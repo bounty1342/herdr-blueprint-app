@@ -28,10 +28,11 @@
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
+import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand, window as host } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
-import { checkoutOf, projectDir, hasDir, readMeta, updateMeta, bookkeeping, load, pruneAll, KEEP_DAYS } from "./store.js";
+import { checkoutOf, projectDir, hasDir, readMeta, updateMeta, isNews, load, pruneAll, KEEP_DAYS } from "./store.js";
+import { addButton, removeButton } from "./setup.js";
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
@@ -361,8 +362,8 @@ export default class Blueprint extends View {
             if (this.project?.dir === p.dir) await this.reload(cx);
             return;
           }
-          if (changed.every(bookkeeping)) await this.rereadMeta(p, cx);
-          else await this.reload(cx);
+          if (changed.some(isNews)) await this.reload(cx);
+          else await this.rereadMeta(p, cx);
         }
       } catch (_) {
       } finally {
@@ -701,6 +702,7 @@ export default class Blueprint extends View {
     else if (c === "zoom-100") this.graphs.length && this.size && this.zoomCenter(1 / this.current().v.z);
     else if (c === "clear") this.selected = null;
     else if (c === "export") this.exportPng(cx);
+    else if (c === "add-button" || c === "remove-button") this.setup(c, cx);
     else if (/^tab-\d$/.test(c)) this.setTab(Number(c.slice(4)) - 1, cx);
     else if (c.startsWith("select-")) this.selected = c.slice(7);
     else if (c === "edit") this.editKey();
@@ -722,6 +724,19 @@ export default class Blueprint extends View {
       this.langForced = true;
       this.useLang(c.slice(5));
     }
+  }
+
+  // The tab bar button: see setup.js.
+  setup(c, cx) {
+    cx.spawn(async (cx) => {
+      const wait = (ms) => new Promise((done) => cx.timer.after(ms, () => done()));
+      try {
+        const said = await (c === "add-button" ? addButton : removeButton)(wait);
+        notify({ title: "Blueprint", body: said, level: "success", timeout: 6000 });
+      } catch (err) {
+        notify({ title: "Blueprint", body: String(err?.message ?? err), level: "error" });
+      }
+    });
   }
 
   setEditing(on) {
@@ -839,8 +854,9 @@ export default class Blueprint extends View {
 
   // Fit, wait for that frame, take the window's frame and keep the canvas part.
   // Saved to ~/Downloads and put on the clipboard.
+  // macOS only for now: it crops with sips and copies with osascript.
   exportPng(cx) {
-    if (this.exporting || !this.size || !this.graphs.length) return;
+    if (this.exporting || !this.size || !this.graphs.length || !canExport()) return;
     if (!this.bounds) {
       return notify({ title: "PNG", body: this.T.pngHover, level: "info", timeout: 4000 });
     }
@@ -1464,9 +1480,12 @@ export default class Blueprint extends View {
       .when(has, (el) => el
         .child(button("bp-fit", this.T.fit, (cx) => this.command("fit", cx), (e) => e.when(fitted, (e) => e.text_color(t.muted))))
         .child(zoom)
-        .child(button("bp-png", this.exporting ? this.T.saving : "PNG", (cx) => this.exportPng(cx))));
+        .when(canExport(), (el) => el.child(button("bp-png", this.exporting ? this.T.saving : "PNG", (cx) => this.exportPng(cx)))));
   }
 }
+
+let platform;
+const canExport = () => (platform ??= host()?.platform ?? "") === "macos";
 
 // `herdr-app shot`, wherever this machine keeps it.
 async function shot(file) {

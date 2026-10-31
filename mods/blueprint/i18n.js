@@ -66,7 +66,7 @@ const TEXT = {
     hintEdit: "E to ask for a change here",
     hintEditing: "Click a node to ask its agent for a change",
     hintNarrow: "Click a node to see its flow",
-    hint: "Click a node to light its flow · E to edit · drag to move · ⌘ scroll to zoom",
+    hint: "Click a node to light its flow · E to edit · drag to move · ⌘/Ctrl scroll to zoom",
   },
   ko: {
     newTip: "에이전트에게 새 다이어그램 요청",
@@ -115,7 +115,7 @@ const TEXT = {
     hintEdit: "E로 이 박스 수정 요청",
     hintEditing: "바꿀 노드를 누르면 담당 에이전트에게 요청해요",
     hintNarrow: "노드를 눌러 흐름 보기",
-    hint: "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 · 드래그로 이동 · ⌘ 스크롤로 확대",
+    hint: "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 · 드래그로 이동 · ⌘/Ctrl 스크롤로 확대",
   },
   ja: {
     newTip: "エージェントに新しい図を依頼",
@@ -164,7 +164,7 @@ const TEXT = {
     hintEdit: "Eでこのボックスの修正を依頼",
     hintEditing: "ノードをクリックすると担当エージェントに依頼します",
     hintNarrow: "ノードをクリックで流れを表示",
-    hint: "ノードをクリックで流れを強調 · E 編集 · ドラッグで移動 · ⌘スクロールで拡大",
+    hint: "ノードをクリックで流れを強調 · E 編集 · ドラッグで移動 · ⌘/Ctrlスクロールで拡大",
   },
 };
 
