@@ -11,16 +11,21 @@
 // request the terminal Blueprint sends. Drag or scroll to move, Ctrl/Cmd+scroll
 // to zoom. The layout turns top-to-bottom when that fits the pane better.
 //
+// It runs as a pane (pane.split {mod: "blueprint"}) or as a side panel next to
+// Files and Changes (props {panel: true}, see scripts/add-button.sh). As a
+// panel it serves the tab on screen, and its dot runs while the pointer is on it.
+//
 // Commands (keys.json or `herdr-app do blueprint.<name>`):
 //   fit, zoom-in, zoom-out, zoom-100, export, clear, tab-1..9, select-<node id>,
 //   edit, compose-<node id>, note-<text, _ for spaces>, send, cancel, target-<terminal>
 
 import { View, div, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, knownAgents, exec, hc, home, notify, nextCommand } from "herdr";
+import { theme, settings, agents, panes, focused, knownAgents, exec, hc, home, notify, readTextFile, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
-import { DIAGRAMS } from "./diagrams.js";
+import { diagramsFor } from "./diagrams.js";
+import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
 const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
@@ -37,7 +42,6 @@ const FLOW_SPOTS = 16; // at most, per run
 const FLOW_GAP = 6; // px between spots, at least
 const FLOW_REST = 360; // ms after each run
 const APPS = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", gemini: "Gemini", opencode: "OpenCode", grok: "Grok", amp: "Amp" };
-const STATUS = { working: "작업 중", blocked: "확인 필요", done: "완료", idle: "대기" };
 // Program keys of coding agents. A Claude Code that reports no status still
 // shows as program "claude" with agent: false, so the key decides; knownAgents()
 // adds whatever programs.json lists.
@@ -67,10 +71,7 @@ function nodeSize(n, m) {
   }
 }
 
-function ago(ts) {
-  const m = Math.floor((Date.now() - ts) / 60000);
-  return m < 1 ? "방금" : m < 60 ? `${m}분 전` : `${Math.floor(m / 60)}시간 전`;
-}
+const minutesSince = (ts) => Math.floor((Date.now() - ts) / 60000);
 
 const inProgress = (n) => n?.status === "active" || n?.status === "current";
 
@@ -101,14 +102,28 @@ function pointPrompt(G, n, note) {
 }
 
 export default class Blueprint extends View {
-  init(_props, cx) {
-    this.graphs = DIAGRAMS.map((d) => ({ ...d, g: parseFlowchart(d.src), loaded: Date.now() }));
+  init(props, cx) {
+    this.inPanel = !!props?.panel;
     this.tab = 0;
     this.views = []; // per tab: {z, x, y} once moved by hand; empty means fit
     this.dirs = []; // per tab: the direction last drawn
     this.measured = {}; // "n:<tab>:<id>" / "e:<tab>:<index>" -> {w, h} at 100%
-    this.vers = this.graphs.map(() => 0); // per tab, bumped when its text is measured
     this.cache = new Map();
+    this.useLang("en");
+    // Follow Claude Code's language, and look again now and then.
+    const follow = (cx) => cx.spawn(async (cx) => {
+      if (this.langForced) return;
+      try {
+        const raw = await readTextFile(`${home()}/.claude/settings.json`);
+        const lang = pickLang(raw ? JSON.parse(raw).language : null);
+        if (lang !== this.lang) {
+          this.useLang(lang);
+          this.redraw(cx);
+        }
+      } catch (_) {}
+    });
+    follow(cx);
+    cx.timer.every(60000, (cx) => follow(cx));
     this.size = null; // canvas, logical px
     this.width = 0; // whole view
     this.selected = null;
@@ -121,7 +136,11 @@ export default class Blueprint extends View {
     this.target = null; // a terminal address chosen over the default agent
     this.typing = false;
     this.sending = false;
-    this.input = InputState.new({ placeholder: "무엇을 바꿀까요? 예: 여기에 rate limit 추가" });
+    // The placeholder is drawn by hand (an InputState's can't change), so it
+    // follows the language.
+    this.input = InputState.new();
+    this.noteEmpty = true;
+    this.input.on("change", (_e, cx) => { this.noteEmpty = !this.input.value(); cx.notify(); });
     this.input.on("submit", (_e, cx) => this.send(cx));
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
@@ -133,7 +152,7 @@ export default class Blueprint extends View {
         cx.notify();
       } catch (_) {}
     });
-    cx.timer.every(30000, (cx) => cx.notify()); // "N분 전"
+    cx.timer.every(30000, (cx) => cx.notify()); // "N min ago"
     cx.spawn(async (cx) => {
       for (;;) {
         this.command(await nextCommand(), cx);
@@ -150,6 +169,22 @@ export default class Blueprint extends View {
   // happens most right after a reload, a resize or a new tab. A dropped render
   // leaves nothing behind, so a render marks itself done only at its end, and
   // until one does, keep asking (a few times, backing off).
+  // Language: UI text and the sample diagrams. Sizes and layouts belong to the
+  // text, so they start over.
+  useLang(lang) {
+    this.lang = lang;
+    this.T = text(lang);
+    this.graphs = diagramsFor(lang).map((d) => ({ ...d, g: parseFlowchart(d.src), loaded: Date.now() }));
+    this.measured = {};
+    this.vers = this.graphs.map(() => 0); // per tab, bumped when its text is measured
+    this.cache.clear();
+    this.views = [];
+    this.dirs = [];
+    this.selected = null;
+    this.compose = null;
+    this.tab = Math.min(this.tab ?? 0, this.graphs.length - 1);
+  }
+
   redraw(cx) {
     cx.notify();
     this.heal(cx);
@@ -273,12 +308,13 @@ export default class Blueprint extends View {
   // Who a request goes to: agents in this pane's tab, the most recent first,
   // then terminals there running an agent program that reports no status.
   targets(all = panes()) {
-    const me = all.find((p) => p.mod === MOD);
-    const list = agents().filter((a) => !me || a.tab === me.tab).sort((a, b) => b.seq - a.seq)
+    // A pane serves its own tab; a panel serves the tab on screen.
+    const tab = this.inPanel ? focused()?.tab : all.find((p) => p.mod === MOD)?.tab;
+    const list = agents().filter((a) => !tab || a.tab === tab).sort((a, b) => b.seq - a.seq)
       .map((a) => ({ address: a.address, name: APPS[a.app] ?? a.program?.name ?? a.app ?? a.address, status: a.status }));
     for (const p of all) {
       const agent = p.program && (p.program.agent || this.agentKeys.has(p.program.key));
-      if (p.terminal && (!me || p.tab === me.tab) && agent && !list.some((x) => x.address === p.terminal)) {
+      if (p.terminal && (!tab || p.tab === tab) && agent && !list.some((x) => x.address === p.terminal)) {
         list.push({ address: p.terminal, name: p.program.name, status: p.status });
       }
     }
@@ -307,6 +343,11 @@ export default class Blueprint extends View {
     else if (c === "send") this.send(cx);
     else if (c === "cancel") this.closeCompose();
     else if (c.startsWith("target-")) this.target = c.slice(7) || null;
+    else if (c === "lang-auto") this.langForced = false;
+    else if (/^lang-(en|ko|ja)$/.test(c)) {
+      this.langForced = true;
+      this.useLang(c.slice(5));
+    }
   }
 
   setEditing(on) {
@@ -318,7 +359,10 @@ export default class Blueprint extends View {
     if (!this.graph.nodes.has(id)) return;
     this.editing = true;
     this.selected = id;
-    if (this.compose?.id !== id) this.input.set_value("");
+    if (this.compose?.id !== id) {
+      this.input.set_value("");
+      this.noteEmpty = true;
+    }
     this.compose = { id };
     this.input.focus();
   }
@@ -337,7 +381,7 @@ export default class Blueprint extends View {
     if (!note || !n) return;
     const target = this.pickTarget(this.targets());
     if (!target) {
-      notify({ title: "보낼 에이전트가 없어요", body: "이 탭에 에이전트를 열고 다시 보내 주세요", level: "warning", timeout: 4000 });
+      notify({ title: this.T.noTarget, body: this.T.noAgentBody, level: "warning", timeout: 4000 });
       return;
     }
     const text = pointPrompt(this.graphs[this.tab], n, note);
@@ -347,13 +391,14 @@ export default class Blueprint extends View {
       try {
         const r = await hc(["send", target.address, text]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
-        notify({ title: `${target.name}에게 보냈어요`, body: `${n.title}: ${note}`, level: "success", timeout: 4000 });
+        notify({ title: this.T.sent(target.name), body: `${n.title}: ${note}`, level: "success", timeout: 4000 });
         this.input.set_value("");
+        this.noteEmpty = true;
         this.compose = null;
         this.editing = false;
         this.focus.focus();
       } catch (err) {
-        notify({ title: "보내지 못했어요", body: String(err?.message ?? err), level: "error" });
+        notify({ title: this.T.sendFailed, body: String(err?.message ?? err), level: "error" });
       }
       this.sending = false;
       this.redraw(cx);
@@ -388,7 +433,7 @@ export default class Blueprint extends View {
   exportPng(cx) {
     if (this.exporting || !this.size) return;
     if (!this.bounds) {
-      return notify({ title: "PNG", body: "포인터를 다이어그램 위에 한 번 올린 뒤 다시 눌러 주세요", level: "info", timeout: 4000 });
+      return notify({ title: "PNG", body: this.T.pngHover, level: "info", timeout: 4000 });
     }
     const saved = { view: this.views[this.tab], selected: this.selected, hovered: this.hovered };
     Object.assign(this, { exporting: true, selected: null, hovered: null });
@@ -414,9 +459,9 @@ export default class Blueprint extends View {
         await exec("rm", ["-f", tmp]);
         if (r.code !== 0) throw new Error(r.stderr || r.stdout);
         await exec("osascript", ["-e", `set the clipboard to (read (POSIX file "${out}") as «class PNGf»)`]);
-        notify({ title: "PNG 저장, 클립보드에 복사", body: out, level: "success", timeout: 5000 });
+        notify({ title: this.T.pngSaved, body: out, level: "success", timeout: 5000 });
       } catch (err) {
-        notify({ title: "PNG를 만들지 못했어요", body: String(err?.message ?? err), level: "error" });
+        notify({ title: this.T.pngFailed, body: String(err?.message ?? err), level: "error" });
       }
       done(cx);
     }));
@@ -436,7 +481,7 @@ export default class Blueprint extends View {
     const t = theme(), pal = palette(t);
     this.mono = settings().font_family;
     const all = panes();
-    this.paneFocused = !!all.find((p) => p.mod === MOD)?.focused;
+    this.paneFocused = this.inPanel ? !!this.hovering : !!all.find((p) => p.mod === MOD)?.focused;
     this.targetList = this.targets(all);
     const G = this.graphs[this.tab];
     const narrow = this.width > 0 && this.width < 420;
@@ -453,9 +498,14 @@ export default class Blueprint extends View {
         this.redraw(cx);
       })
       .on_mouse_move((e) => (this.bounds = e.bounds ?? this.bounds))
+      .when(this.inPanel, (el) => el.on_hover((on, cx) => {
+        this.hovering = on;
+        this.redraw(cx);
+      }))
       .on_mouse_down("left", () => this.focus.focus())
       .on_key_down((e, cx) => {
-        const k = e.keystroke;
+        // Shortcuts work with a Korean or Japanese input source on, too.
+        const k = KEY_ALIASES[e.key_char] ?? KEY_ALIASES[e.key] ?? e.keystroke;
         if (k === "escape") {
           if (this.compose) this.closeCompose();
           else if (this.editing) this.setEditing(false);
@@ -481,16 +531,16 @@ export default class Blueprint extends View {
   header(t, pal, G, narrow) {
     const a = this.pickTarget(this.targetList);
     const c = a ? { working: pal.active, blocked: t.blocked, done: pal.done }[a.status] ?? t.muted : t.dim;
-    const said = a?.status ? STATUS[a.status] : null;
-    const text = !a ? "에이전트 없음" : narrow ? said ?? a.name : said ? `${a.name} · ${said}` : a.name;
+    const T = this.T, said = a?.status ? T.status[a.status] : null;
+    const label = !a ? T.noAgent : narrow ? said ?? a.name : said ? `${a.name} · ${said}` : a.name;
     const pill = h_flex().flex_none().gap(6).px(10).h(24).rounded_full().items_center().bg(alpha(c, 0.14))
       .child(div().w(7).h(7).rounded_full().bg(c))
-      .child(div().text_size(12).text_color(c).child(text));
+      .child(div().text_size(12).text_color(c).child(label));
     return h_flex().h(HEADER_H).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
       .when(!narrow, (el) => el.child(div().flex_none().text_color(t.muted).child("Blueprint")))
       .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(G.g.title ?? G.tab))
       .child(pill)
-      .child(div().flex_none().text_size(12).text_color(t.muted).child(ago(G.loaded)))
+      .child(div().flex_none().text_size(12).text_color(t.muted).child(T.ago(minutesSince(G.loaded))))
       .child(div().id("bp-edit").flex_none().h(26).px(10).flex().items_center().rounded(6).border(1).text_size(12)
         .cursor_pointer().border_color(this.editing ? alpha(t.accent, 0.6) : t.border)
         .text_color(this.editing ? t.accent : t.foreground)
@@ -500,7 +550,7 @@ export default class Blueprint extends View {
           this.setEditing(!this.editing);
           this.redraw(cx);
         })
-        .child(this.editing ? "수정 중" : "수정"));
+        .child(this.editing ? T.editing : T.edit));
   }
 
   tabs(t) {
@@ -560,8 +610,8 @@ export default class Blueprint extends View {
     return el.children(this.drawing(t, pal))
       .when(this.editing, (el) => el.child(h_flex().absolute().left(12).top(12).gap(6).px(10).h(26).items_center().rounded(6)
         .bg(alpha(t.accent, 0.16)).border(1).border_color(alpha(t.accent, 0.5)).text_size(12).text_color(t.accent)
-        .child(div().font_semibold().child("수정 모드"))
-        .child(div().text_color(t.muted).child(this.compose ? "Enter 보내기 · Esc 취소" : "바꿀 노드를 누르세요 · Esc 끝내기"))))
+        .child(div().font_semibold().child(this.T.editMode))
+        .child(div().text_color(t.muted).child(this.compose ? this.T.enterSend : this.T.pickNode))))
       .when(!!this.compose, (el) => el.child(this.composer(t)));
   }
 
@@ -598,14 +648,17 @@ export default class Blueprint extends View {
         .child(div().id("bp-target").flex_none().px(8).h(22).flex().items_center().rounded(6).text_size(11.5)
           .bg(alpha(target ? t.accent : t.blocked, 0.12)).text_color(target ? t.accent : t.blocked)
           .when(list.length > 1, (el) => el.cursor_pointer().on_click((_e, cx) => { next(); this.redraw(cx); }))
-          .child(target ? `→ ${target.name}${list.length > 1 ? " ⇄" : ""}` : "보낼 에이전트 없음")))
-      .child(Input.new(this.input).h(34).px(10).rounded(8).border(1).border_color(this.typing ? t.accent : t.input)
-        .bg(t.background).text_size(13).text_color(t.foreground))
+          .child(target ? `→ ${target.name}${list.length > 1 ? " ⇄" : ""}` : this.T.noTarget)))
+      .child(div().relative()
+        .child(Input.new(this.input).h(34).px(10).rounded(8).border(1).border_color(this.typing ? t.accent : t.input)
+          .bg(t.background).text_size(13).text_color(t.foreground))
+        .when(this.noteEmpty, (el) => el.child(div().absolute().left(11).top(0).h(34).flex().items_center()
+          .text_size(13).text_color(t.dim).child(this.T.placeholder))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
-          .child(target ? "박스, 소스 위치, 연결된 코드와 함께 보냅니다" : "이 탭에 에이전트를 열면 보낼 수 있어요"))
-        .child(button("bp-cancel", "취소", false, true, () => this.closeCompose()))
-        .child(button("bp-send", this.sending ? "보내는 중…" : "보내기", true, ready, (cx) => this.send(cx))));
+          .child(target ? this.T.sendsWith : this.T.openAgent))
+        .child(button("bp-cancel", this.T.cancel, false, true, () => this.closeCompose()))
+        .child(button("bp-send", this.sending ? this.T.sending : this.T.send, true, ready, (cx) => this.send(cx))));
   }
 
   drawing(t, pal) {
@@ -651,8 +704,11 @@ export default class Blueprint extends View {
       const active = into.has(ed.e) && lit;
       const dashed = ed.e.style === "dashed" || active;
       const look = active ? "active" : !lit ? "dim" : sel ? "lit" : "plain";
-      const color = { active: alpha(pal.active, 0.45), dim: alpha(t.muted, 0.18), lit: t.foreground, plain: alpha(t.muted, 0.75) }[look];
-      const gr = lineGroup(`${look}:${dashed}`, color, look === "lit" || active ? 1.6 : 1.25, dashed ? [4, 4] : null);
+      // A picked node's flow is drawn heavier, the yellow work edges included.
+      const strong = !!sel && lit;
+      const color = { active: alpha(pal.active, strong ? 0.95 : 0.45), dim: alpha(t.muted, 0.18), lit: t.foreground, plain: alpha(t.muted, 0.75) }[look];
+      const width = strong ? 2 : active ? 1.6 : 1.25;
+      const gr = lineGroup(`${look}:${dashed}:${width}`, color, width, dashed ? [4, 4] : null);
       const pts = ed.segs.map((sg) => sg.map((p) => ({ x: X(p.x), y: Y(p.y) })));
       const end = pts[pts.length - 1][3], d = ed.dir;
       const stop = ed.e.arrow ? { x: end.x - d.x * head * 0.8, y: end.y - d.y * head * 0.8 } : end;
@@ -877,15 +933,14 @@ export default class Blueprint extends View {
       ? h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden()
         .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(n.title))
         .when(!!n.ref, (el) => el.child(div().min_w(0).truncate().text_size(11).font_family(mono).text_color(t.accent).child(n.ref)))
-        .when(!narrow && !this.editing, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("수정하려면 E")))
+        .when(!narrow && !this.editing, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(this.T.hintEdit)))
       : div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted)
-        .child(this.editing ? "바꿀 노드를 누르면 담당 에이전트에게 요청해요"
-          : narrow ? "노드를 눌러 흐름 보기" : "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 모드 · 드래그로 이동 · ⌘ 스크롤로 확대");
+        .child(this.editing ? this.T.hintEditing : narrow ? this.T.hintNarrow : this.T.hint);
     return h_flex().h(FOOTER_H).flex_none().px(12).gap(6).items_center().border_t(1).border_color(t.border)
       .child(info)
-      .child(button("bp-fit", "맞춤", (cx) => this.command("fit", cx), (el) => el.when(fitted, (e) => e.text_color(t.muted))))
+      .child(button("bp-fit", this.T.fit, (cx) => this.command("fit", cx), (el) => el.when(fitted, (e) => e.text_color(t.muted))))
       .child(zoom)
-      .child(button("bp-png", this.exporting ? "저장 중…" : "PNG", (cx) => this.exportPng(cx)));
+      .child(button("bp-png", this.exporting ? this.T.saving : "PNG", (cx) => this.exportPng(cx)));
   }
 }
 
