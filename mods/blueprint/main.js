@@ -31,7 +31,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
-import { checkoutOf, projectDir, hasDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
+import { checkoutOf, projectDir, hasDir, readMeta, updateMeta, bookkeeping, load, pruneAll, KEEP_DAYS } from "./store.js";
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
@@ -48,6 +48,8 @@ const FLOW_MS = 45; // per spot
 const FLOW_SPOTS = 16; // at most, per run
 const FLOW_GAP = 6; // px between spots, at least
 const FLOW_REST = 360; // ms after each run
+const RUNS = 8; // dots at most, one per run
+const FLOW_BUDGET = 40; // spots for all runs together: many runs get fewer each
 const APPS = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", gemini: "Gemini", opencode: "OpenCode", grok: "Grok", amp: "Amp" };
 // Program keys of coding agents. A Claude Code that reports no status still
 // shows as program "claude" with agent: false, so the key decides; knownAgents()
@@ -82,6 +84,16 @@ const minutesSince = (ts) => Math.floor((Date.now() - ts) / 60000);
 
 const inProgress = (n) => n?.status === "active" || n?.status === "current";
 
+// An agent's status as the sidebar's Agents list marks it: working spins in the
+// working colour, done is a dot, idle a ring, needs-you a "!".
+function statusMark(t, status) {
+  if (status === "working") return svg("mods/blueprint/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+  if (status === "blocked") return div().size(14).flex_none().rounded(4).bg(alpha(t.blocked, 0.15)).text_size(10.5).font_bold()
+    .text_color(t.blocked).flex().items_center().justify_center().child("!");
+  if (status === "idle") return div().size(7).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
+  return div().size(7).flex_none().rounded(4).bg(status === "done" ? t.done ?? t.dim : t.dim);
+}
+
 // `text` in a code fence longer than any backtick run inside it.
 function fenced(text, lang) {
   const n = Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1));
@@ -105,7 +117,10 @@ function pointPrompt(G, n, note, path) {
   const where = n.line ? `, line ${n.line}: ${inline(n.lineText)}` : "";
   const stands = n.ref ? ` It stands for \`${n.ref}\`.` : "";
   const work = "Make this change in the code there and anything that depends on it, run the tests, then ";
-  const todo = n.ref ? `${work}update the diagram in \`${path}\`.` : `Change it and anything it describes, then update the diagram in \`${path}\`.`;
+  // The Blueprint skill's "send it" means herdr-blueprint send, the terminal
+  // Blueprint; here the diagram is the file.
+  const save = `update the diagram in \`${path}\` (the Blueprint app shows that file; don't use herdr-blueprint send).`;
+  const todo = n.ref ? `${work}${save}` : `Change it and anything it describes, then ${save}`;
   const text = `In Blueprint I pointed at the box "${label}" in the diagram you sent ('${G.g.title ?? G.tab}')${where}.${stands}\n${note}\n${todo}\n${fenced(G.src, "mermaid")}\n`;
   return clean(text);
 }
@@ -119,6 +134,7 @@ const LANG_NAMES = { en: "English", ko: "Korean", ja: "Japanese" };
 function diagramRules(lang) {
   return `- Start the file with YAML frontmatter: \`title: ...\`. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class, route or columns).
 - Blueprint draws Mermaid flowcharts only. For a database, draw one cylinder box per table (\`users[("users<br/>id · email")]\`) and label the edges with the relation (\`-->|1:N|\`).
+- Draw only what the code has. If the project has no such thing (say, no database), tell me so in your reply and draw what plays that part instead, titled for what it really is (e.g. "Data files"), with plain boxes: a cylinder means a real database table.
 - Every box is a piece of the code, not a step of your task. Tie each box to it: \`%% code: <node id> <path>:<line>\`.
 - Mark progress: \`class <ids> done\` for finished parts, \`class <ids> active\` for work in progress, \`class <id> current\` for what you are on right now.
 - After each unit of work, update that file in place (change only what changed). Skip it when the flow did not change. Diagrams nobody uses for ${KEEP_DAYS} days are deleted.`;
@@ -162,6 +178,7 @@ export default class Blueprint extends View {
     this.dirs = {}; // per diagram file: the direction last drawn
     this.measured = {}; // "n:<file@rev>:<id>" / "e:<file@rev>:<index>" -> {w, h} at 100%
     this.vers = {}; // per file@rev, bumped when its text is measured
+    this.revs = 0; // revs are unique across files and projects, so sizes never mix
     this.cache = new Map();
     this.project = null; // { path, dir, meta, name }
     this.useLang("en");
@@ -218,7 +235,10 @@ export default class Blueprint extends View {
     });
     cx.spawn(async (cx) => {
       for (;;) {
-        this.command(await nextCommand(), cx);
+        const c = await nextCommand();
+        try {
+          this.command(c, cx);
+        } catch (_) {} // one bad command must not end the loop
         this.redraw(cx);
       }
     });
@@ -237,7 +257,8 @@ export default class Blueprint extends View {
   // --- project -------------------------------------------------------------
 
   syncProject(cx) {
-    if (!this.ctxPending || this.syncing) return;
+    if (this.syncing) return;
+    if (!this.ctxPending) return this.lookForFolder(cx);
     this.ctxPending = false;
     this.syncing = true;
     cx.spawn(async (cx) => {
@@ -248,8 +269,34 @@ export default class Blueprint extends View {
     });
   }
 
+  // A project opened before it had a folder: another Blueprint (the panel, a
+  // pane) may connect an agent and make it. Look every few seconds; once it is
+  // there, read it and watch it like any other.
+  lookForFolder(cx) {
+    const p = this.project;
+    if (!p || p.known || Date.now() - (p.looked ?? 0) < 3000) return;
+    p.looked = Date.now();
+    this.syncing = true;
+    cx.spawn(async (cx) => {
+      try {
+        if (await hasDir(p.dir) && p === this.project) {
+          p.known = true;
+          p.meta = await readMeta(p.dir, p.path);
+          await this.reload(cx);
+          this.watch(cx, p);
+        }
+      } catch (_) {}
+      this.syncing = false;
+    });
+  }
+
   async openProject(cwd, cx) {
+    // The tab can change while this waits for git or the disk: then the newer
+    // lookup wins and this one leaves everything as it is.
+    const seq = (this.opens = (this.opens ?? 0) + 1), tab = this.ctxTab;
+    const stale = () => seq !== this.opens || tab !== this.ctxTab;
     const path = cwd ? await checkoutOf(cwd) : null;
+    if (stale()) return;
     if (path === (this.project?.path ?? null)) {
       this.loading = false;
       return this.redraw(cx);
@@ -266,38 +313,72 @@ export default class Blueprint extends View {
     // tab it passes. Connecting or asking for a diagram makes it.
     const dir = projectDir(path);
     const known = await hasDir(dir);
-    const meta = await readMeta(dir, path);
-    if (known) {
-      meta.opened = Date.now();
-      await writeMeta(dir, meta);
-    }
-    this.project = { path, dir, meta, name: path.split("/").filter(Boolean).pop() ?? path };
+    let meta = await readMeta(dir, path);
+    if (known) meta = await updateMeta(dir, path, (m) => (m.opened = Date.now()));
+    if (stale()) return;
+    this.forget();
+    this.project = { path, dir, meta, known, name: path.split("/").filter(Boolean).pop() ?? path };
     await this.reload(cx);
     this.loading = false;
     this.redraw(cx);
-    if (known) this.watch(cx);
+    if (known) this.watch(cx, this.project);
+  }
+
+  // Another project: sizes, layouts and views of the last one's files don't
+  // apply, even to a file of the same name.
+  forget() {
+    this.graphs = [];
+    this.views = {};
+    this.dirs = {};
+    this.measured = {};
+    this.vers = {};
+    this.cache.clear();
+  }
+
+  // Changes project.json: here at once, on disk merged into what is there now
+  // (another Blueprint on the same project may have changed it meanwhile).
+  async saveMeta(p, change) {
+    change(p.meta);
+    const merged = await updateMeta(p.dir, p.path, change);
+    p.known = true;
+    if (p === this.project) p.meta = merged;
+    return merged;
   }
 
   // Redraw when the project's folder changes (the agent saved a diagram). One
   // watch per project at a time; a newer project stops it.
-  watch(cx) {
-    const p = this.project, gen = this.watchGen;
-    if (!p || this.watching === `${gen}:${p.dir}`) return;
-    this.watching = `${gen}:${p.dir}`;
+  watch(cx, p) {
+    if (!p || p !== this.project) return;
+    const gen = this.watchGen, key = `${gen}:${p.dir}`;
+    if (this.watching === key) return;
+    this.watching = key;
     cx.spawn(async (cx) => {
-      for (;;) {
-        let changed;
-        try {
-          changed = await watchFolder(p.dir);
-        } catch (_) {
-          return;
+      try {
+        for (;;) {
+          const changed = await watchFolder(p.dir);
+          if (gen !== this.watchGen) {
+            // Left and came back: the new watch may have missed this change.
+            if (this.project?.dir === p.dir) await this.reload(cx);
+            return;
+          }
+          if (changed.every(bookkeeping)) await this.rereadMeta(p, cx);
+          else await this.reload(cx);
         }
-        if (gen !== this.watchGen) return;
-        // Blueprint's own bookkeeping (project.json) is not news.
-        if (changed.every((f) => f.endsWith("project.json"))) continue;
-        await this.reload(cx);
+      } catch (_) {
+      } finally {
+        if (this.watching === key) this.watching = null;
       }
     });
+  }
+
+  // project.json changed: maybe another Blueprint pinned something. Reading is
+  // all this does, so its own writes don't come back around.
+  async rereadMeta(p, cx) {
+    const meta = await readMeta(p.dir, p.path);
+    if (p !== this.project) return;
+    p.meta = meta;
+    for (const d of this.graphs) d.pinned = meta.pinned.includes(d.key);
+    this.redraw(cx);
   }
 
   async reload(cx) {
@@ -321,7 +402,7 @@ export default class Blueprint extends View {
     const shown = this.graphs[this.tab]?.key;
     this.graphs = [...items].sort((a, b) => a.file.localeCompare(b.file)).map((f) => {
       const old = before.get(f.file);
-      const rev = !old ? 0 : old.src === f.src ? old.rev : old.rev + 1;
+      const rev = old && old.src === f.src ? old.rev : ++this.revs;
       if (old && rev !== old.rev) delete this.views[f.file];
       const g = old && rev === old.rev ? old.g : parseFlowchart(f.src);
       return { key: f.file, rev, src: f.src, g, tab: g.title ?? f.file.replace(/\.mmd$/, ""), loaded: f.mtime, pinned: f.pinned };
@@ -330,25 +411,37 @@ export default class Blueprint extends View {
     const i = this.graphs.findIndex((d) => d.key === shown);
     this.tab = i >= 0 ? i : Math.max(0, this.graphs.findIndex((d) => d.key === newest));
     // The diagram asked for with + has arrived: show it.
-    const ask = this.expectNew;
-    if (ask && Date.now() - ask.since > ASK_WAIT) this.expectNew = null;
-    const arrived = ask && this.graphs.findIndex((d) => !ask.known.has(d.key));
-    if (ask && arrived >= 0) {
+    const ask = this.asking();
+    const arrived = ask ? this.graphs.findIndex((d) => !ask.known.has(d.key)) : -1;
+    if (arrived >= 0) {
       this.tab = arrived;
       this.expectNew = null;
     }
+    // Another diagram on screen: what was picked or written was about the old one.
+    if (this.graphs[this.tab]?.key !== shown) {
+      this.selected = null;
+      if (this.compose?.id) this.compose = null;
+    }
     if (this.selected && !this.graph.nodes.has(this.selected)) this.selected = null;
-    if (this.compose && !this.graph.nodes.has(this.compose.id)) this.compose = null;
+    if (this.compose?.id && !this.graph.nodes.has(this.compose.id)) this.compose = null;
+  }
+
+  // A diagram asked for with + in this project, not here yet.
+  asking() {
+    const ask = this.expectNew;
+    if (ask && Date.now() - ask.since > ASK_WAIT) this.expectNew = null;
+    return this.expectNew && this.expectNew.dir === this.project?.dir ? this.expectNew : null;
   }
 
   // Looking at a diagram keeps it: its "seen" time pushes back the deletion.
   markSeen(cx) {
     const p = this.project, d = this.graphs[this.tab];
-    if (!p || !d || Date.now() - (p.meta.seen[d.key] ?? 0) < 60000) return;
-    p.meta.seen[d.key] = Date.now();
+    // A folder nobody made yet stays unmade (an empty project has no diagram).
+    if (!p || !p.known || !d || Date.now() - (p.meta.seen[d.key] ?? 0) < 60000) return;
+    const at = Date.now(), file = d.key;
     cx.spawn(async () => {
       try {
-        await writeMeta(p.dir, p.meta);
+        await this.saveMeta(p, (m) => (m.seen = { ...m.seen, [file]: at }));
       } catch (_) {}
     });
   }
@@ -356,14 +449,11 @@ export default class Blueprint extends View {
   togglePin(cx) {
     const p = this.project, d = this.graphs[this.tab];
     if (!p || !d) return;
-    const pinned = new Set(p.meta.pinned);
-    if (pinned.has(d.key)) pinned.delete(d.key);
-    else pinned.add(d.key);
-    p.meta.pinned = [...pinned];
-    d.pinned = pinned.has(d.key);
+    const on = !d.pinned, file = d.key;
+    d.pinned = on;
     cx.spawn(async () => {
       try {
-        await writeMeta(p.dir, p.meta);
+        await this.saveMeta(p, (m) => (m.pinned = on ? [...new Set([...m.pinned, file])] : m.pinned.filter((f) => f !== file)));
       } catch (_) {}
     });
   }
@@ -372,18 +462,20 @@ export default class Blueprint extends View {
   connect(target, cx) {
     const p = this.project;
     if (!p || !target) return;
-    p.meta.agent = target.address;
-    p.meta.asked = Date.now();
+    const at = Date.now();
     this.target = null;
     cx.spawn(async (cx) => {
       try {
-        await writeMeta(p.dir, p.meta);
-        this.watch(cx);
+        // The folder first: the prompt says it exists, and a project with a
+        // fresh "asked" is not cleaned up while the agent draws.
+        await this.saveMeta(p, (m) => Object.assign(m, { agent: target.address, asked: at, opened: at }));
+        this.watch(cx, p);
         const r = await hc(["send", target.address, drawPrompt(p.dir, this.lang)]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
         notify({ title: this.T.asked(target.name), body: p.path, level: "success", timeout: 4000 });
       } catch (err) {
-        p.meta.asked = 0;
+        // Not asked after all: the agent list comes back, here and elsewhere.
+        await this.saveMeta(p, (m) => (m.asked = 0)).catch(() => {});
         notify({ title: this.T.sendFailed, body: String(err?.message ?? err), level: "error" });
       }
       this.redraw(cx);
@@ -536,9 +628,11 @@ export default class Blueprint extends View {
     }
     const yellow = new Set([...inner, ...entries.map((x) => x.lead).filter(Boolean)].map((ed) => ed.e));
     const runs = [];
+    // At most RUNS dots: each one is frames the window repaints.
     const walk = (path, id, seen) => {
+      if (runs.length >= RUNS) return;
       const next = inner.filter((ed) => ed.e.from === id && !seen.has(ed.e.to));
-      if (!next.length || runs.length >= 8) return path.length && runs.push(path);
+      if (!next.length) return path.length && runs.push(path);
       for (const ed of next) walk([...path, ed], ed.e.to, new Set([...seen, ed.e.to]));
     };
     for (const { id, lead } of entries) walk(lead ? [lead] : [], id, new Set([id]));
@@ -593,8 +687,9 @@ export default class Blueprint extends View {
   // An agent picked here wins, then the one connected to this project, then
   // the most recent one in the tab.
   pickTarget(list) {
-    if (this.target) return list.find((x) => x.address === this.target) ?? { address: this.target, name: this.target, status: null };
-    return list.find((x) => x.address === this.project?.meta.agent) ?? list[0] ?? null;
+    // Only agents of the tab served now: a pick made in another tab doesn't count.
+    return list.find((x) => x.address === this.target)
+      ?? list.find((x) => x.address === this.project?.meta.agent) ?? list[0] ?? null;
   }
 
   // --- actions -----------------------------------------------------------
@@ -603,14 +698,17 @@ export default class Blueprint extends View {
     if (c === "fit") this.views[this.vkey] = null;
     else if (c === "zoom-in") this.zoomCenter(1.25);
     else if (c === "zoom-out") this.zoomCenter(0.8);
-    else if (c === "zoom-100") this.graphs.length && this.zoomCenter(1 / this.current().v.z);
+    else if (c === "zoom-100") this.graphs.length && this.size && this.zoomCenter(1 / this.current().v.z);
     else if (c === "clear") this.selected = null;
     else if (c === "export") this.exportPng(cx);
     else if (/^tab-\d$/.test(c)) this.setTab(Number(c.slice(4)) - 1, cx);
     else if (c.startsWith("select-")) this.selected = c.slice(7);
-    else if (c === "edit") this.setEditing(!this.editing);
+    else if (c === "edit") this.editKey();
     else if (c.startsWith("compose-")) this.openCompose(c.slice(8));
-    else if (c.startsWith("note-")) this.input.set_value(c.slice(5).replaceAll("_", " "));
+    else if (c.startsWith("note-")) {
+      this.input.set_value(c.slice(5).replaceAll("_", " "));
+      this.noteEmpty = !this.input.value();
+    }
     else if (c === "send") this.send(cx);
     else if (c === "cancel") this.closeCompose();
     else if (c.startsWith("target-")) this.target = c.slice(7) || null;
@@ -629,6 +727,13 @@ export default class Blueprint extends View {
   setEditing(on) {
     this.editing = on;
     if (!on) this.closeCompose();
+  }
+
+  // E (and the edit button): with a node picked, straight to writing its
+  // request; otherwise edit mode on or off.
+  editKey() {
+    if (!this.compose && this.selected && this.graph.nodes.has(this.selected)) this.openCompose(this.selected);
+    else this.setEditing(!this.editing);
   }
 
   openCompose(id) {
@@ -674,8 +779,9 @@ export default class Blueprint extends View {
       notify({ title: this.T.noTarget, body: this.T.noAgentBody, level: "warning", timeout: 4000 });
       return;
     }
+    const p = this.project;
     const text = fresh
-      ? newPrompt(this.project.dir, note, this.lang, this.graphs.map((d) => d.key))
+      ? newPrompt(p.dir, note, this.lang, this.graphs.map((d) => d.key))
       : pointPrompt(this.graphs[this.tab], n, note, `${this.project.dir}/${this.vkey}`);
     this.sending = true;
     this.redraw(cx);
@@ -683,14 +789,15 @@ export default class Blueprint extends View {
       try {
         if (fresh) {
           // The agent is told the folder exists.
-          await writeMeta(this.project.dir, this.project.meta);
-          this.watch(cx);
+          const at = Date.now();
+          await this.saveMeta(p, (m) => Object.assign(m, { opened: at, asked: at }));
+          this.watch(cx, p);
         }
         const r = await hc(["send", target.address, text]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
         notify({ title: this.T.sent(target.name), body: fresh ? note : `${n.title}: ${note}`, level: "success", timeout: 4000 });
         // A new diagram: wait for a file that isn't there yet, then show it.
-        if (fresh) this.expectNew = { known: new Set(this.graphs.map((d) => d.key)), since: Date.now(), label: note };
+        if (fresh) this.expectNew = { dir: p.dir, known: new Set(this.graphs.map((d) => d.key)), since: Date.now(), label: note };
         this.input.set_value("");
         this.noteEmpty = true;
         this.compose = null;
@@ -791,17 +898,24 @@ export default class Blueprint extends View {
     if (tabId !== this.ctxTab) {
       this.ctxTab = tabId;
       this.ctxCwd = undefined;
+      this.ctxTerm = null;
       this.project = null;
       this.watchGen = (this.watchGen ?? 0) + 1;
-      this.graphs = [];
+      this.forget();
       this.selected = null;
       this.compose = null;
+      this.target = null;
       this.loading = true;
     }
-    // The project is the folder of the tab's agent: the connected one, else
-    // the first. No agent there, no project. syncProject does the rest.
+    // The project is the folder of one of the tab's agents: the one already
+    // followed while it stays, else the connected one, else the first. (Not
+    // the connected one first: with agents of two checkouts in a tab, each
+    // project's connected agent would switch to the other, back and forth.)
+    // No agent there, no project. syncProject does the rest.
     const terms = all.filter((p) => p.terminal && p.tab === tabId && this.targetList.some((x) => x.address === p.terminal));
-    const pick = terms.find((p) => p.terminal === this.project?.meta.agent) ?? terms[0];
+    const pick = terms.find((p) => p.terminal === this.ctxTerm)
+      ?? terms.find((p) => p.terminal === this.project?.meta.agent) ?? terms[0];
+    this.ctxTerm = pick?.terminal ?? null;
     this.ctxPane = pick?.pane ?? null;
     this.ctxBranch = pick?.branch ?? null;
     if ((pick?.cwd ?? null) !== this.ctxCwd || this.ctxCwd === undefined) {
@@ -842,7 +956,7 @@ export default class Blueprint extends View {
           else if (this.editing) this.setEditing(false);
           else this.selected = null;
         } else if (this.typing) return; // letters belong to the composer
-        else if (k === "e") this.setEditing(!this.editing);
+        else if (k === "e") this.editKey();
         else if (k === "f") this.command("fit", cx);
         else if (k === "0") this.command("zoom-100", cx);
         else if (k === "=" || k === "shift-=") this.command("zoom-in", cx);
@@ -872,13 +986,12 @@ export default class Blueprint extends View {
         this.redraw(cx);
       })
       .child(svg(`mods/blueprint/${file}`).size(15));
+    // The agent with the same status marks as the Agents list in the sidebar.
     const a = this.pickTarget(this.targetList);
-    const c = a ? { working: pal.active, blocked: t.blocked, done: pal.done }[a.status] ?? t.muted : t.dim;
-    const said = a?.status ? T.status[a.status] : null;
-    const label = !a ? T.noAgent : narrow ? said ?? a.name : said ? `${a.name} · ${said}` : a.name;
-    const pill = h_flex().flex_none().gap(6).px(10).h(24).rounded_full().items_center().bg(alpha(c, 0.14))
-      .child(div().w(7).h(7).rounded_full().bg(c))
-      .child(div().text_size(12).text_color(c).child(label));
+    const pill = h_flex().id("bp-agent").flex_none().gap(6).px(10).h(24).rounded_full().items_center().bg(t.raised)
+      .tooltip(a?.status ? T.status[a.status] ?? a.status : a?.name ?? T.noAgent)
+      .when(!!a, (el) => el.child(statusMark(t, a.status)))
+      .child(div().text_size(12).text_color(a ? t.muted : t.dim).max_w(160).truncate().child(a ? a.name : T.noAgent));
     return h_flex().h(HEADER_H).flex_none().pl(16).pr(10).gap(8).items_center().border_b(1).border_color(t.border)
       .child(h_flex().flex_1().min_w(0).gap(8).items_center()
         // While the tab's project is being looked up there is nothing to name yet.
@@ -888,7 +1001,7 @@ export default class Blueprint extends View {
       .child(div().mr(4).child(pill))
       .when(!!G, (el) => el.child(icon("bp-pin", G.pinned ? "pin-on.svg" : "pin.svg", G.pinned ? T.unpinTip : T.pinTip, G.pinned, (cx) => this.togglePin(cx))))
       .when(this.inPanel, (el) => el.child(icon("bp-pane", "pane.svg", T.openPane, false, () => this.openPane())))
-      .when(!!G, (el) => el.child(icon("bp-edit", "edit.svg", T.editTip, this.editing, () => this.setEditing(!this.editing))));
+      .when(!!G, (el) => el.child(icon("bp-edit", "edit.svg", T.editTip, this.editing, () => this.editKey())));
   }
 
   // The parts of the project: one tab per diagram (always, even one), + to
@@ -911,7 +1024,7 @@ export default class Blueprint extends View {
           .when(d.pinned, (el) => el.child(svg("mods/blueprint/pin-on.svg").size(11).flex_none()))
           .child(div().min_w(0).truncate().child(d.tab));
       }))
-      .when(!!this.expectNew, (el) => el.child(div().flex_none().px(10).py(4).rounded(6).text_size(12).text_color(t.dim)
+      .when(!!this.asking(), (el) => el.child(div().flex_none().px(10).py(4).rounded(6).text_size(12).text_color(t.dim)
         .border(1).border_color(t.border).child(this.T.drawingNew)))
       .when(!!p, (el) => el.child(div().id("bp-new").flex_none().size(26).ml(2).flex().items_center().justify_center().rounded(6)
         .cursor_pointer().tooltip(this.T.newTip).text_color(this.compose?.kind === "new" ? t.accent : t.muted)
@@ -1151,7 +1264,8 @@ export default class Blueprint extends View {
     });
     if (tracks.length) {
       const longest = Math.max(...tracks.map((l) => l.len));
-      const step = Math.max(FLOW_GAP, longest / FLOW_SPOTS);
+      const per = Math.max(6, Math.min(FLOW_SPOTS, Math.floor(FLOW_BUDGET / tracks.length)));
+      const step = Math.max(FLOW_GAP, longest / per);
       const cycle = Math.ceil(longest / step) + Math.round(FLOW_REST / FLOW_MS);
       const built = new Set();
       for (const l of tracks) {

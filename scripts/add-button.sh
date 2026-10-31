@@ -10,6 +10,15 @@
 set -eu
 home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 
+# The layout in use now, for remove-button.sh and for a failed run (cloning a
+# layout switches the window to the clone).
+mkdir -p "$home/layouts/.state"
+prev_file="$home/layouts/.state/blueprint-previous-layout"
+prev=$(herdr-app status 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("layout") or "")' 2>/dev/null || true)
+[ -n "$prev" ] && [ "$prev" != main-blueprint ] && printf '%s\n' "$prev" > "$prev_file"
+back() { herdr-app do layout.switch --name "$(cat "$prev_file" 2>/dev/null || echo main)" >/dev/null 2>&1 || true; }
+trap 'back' EXIT
+
 [ -d "$home/mods/tabs-blueprint" ] || herdr-app do mod.clone '{"name":"tabs","as":"tabs-blueprint"}' >/dev/null
 [ -f "$home/layouts/main-blueprint.json" ] || herdr-app do layout.clone '{"name":"main","as":"main-blueprint"}' >/dev/null
 
@@ -58,4 +67,5 @@ PY
 
 herdr-app check "$home/mods/tabs-blueprint" >/dev/null
 herdr-app do layout.switch --name main-blueprint >/dev/null
+trap - EXIT
 echo "Blueprint button added: layout main-blueprint (ctrl-shift-l switches back)"

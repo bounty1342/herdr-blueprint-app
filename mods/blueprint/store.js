@@ -9,8 +9,13 @@
 // A project is a checkout: the git top level of the tab's terminal folder, so
 // every worktree is its own project (its folder stays put while branches come
 // and go), or that folder when it is not in git. Diagrams nobody updated or
-// opened for KEEP_DAYS are deleted unless pinned, and a project keeps at most
-// KEEP_COUNT unpinned ones.
+// opened for KEEP_DAYS are deleted unless pinned, and past a day old a project
+// keeps at most KEEP_COUNT unpinned ones.
+//
+// More than one Blueprint can have a project open (the panel and a pane), so
+// project.json changes through updateMeta, which applies a change to what is on
+// disk, and is replaced whole (written aside, then moved) so a reader never
+// sees half of it.
 
 import * as fs from "fs/promises";
 import { exec, appHome, readTextFile } from "herdr";
@@ -28,8 +33,8 @@ export async function checkoutOf(folder) {
   try {
     const r = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]);
     if (r.code === 0 && r.stdout.trim()) root = r.stdout.trim();
-  } catch (_) {}
-  checkouts.set(folder, root);
+    checkouts.set(folder, root);
+  } catch (_) {} // git didn't run: ask again next time
   return root;
 }
 
@@ -64,8 +69,22 @@ export async function readMeta(dir, path) {
 
 export async function writeMeta(dir, meta) {
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(`${dir}/project.json`, JSON.stringify(meta, null, 1));
+  const tmp = `${dir}/project.json.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(meta, null, 1));
+  const r = await exec("mv", ["-f", tmp, `${dir}/project.json`]);
+  if (r.code !== 0) throw new Error(r.stderr || "mv project.json");
 }
+
+// Applies change(meta) to project.json as it is on disk now, and returns it.
+export async function updateMeta(dir, path, change) {
+  const meta = await readMeta(dir, path);
+  change(meta);
+  await writeMeta(dir, meta);
+  return meta;
+}
+
+// Blueprint's own files in the project folder: changing them is not news.
+export const bookkeeping = (f) => /(^|\/)project\.json(\.tmp)?$/.test(f);
 
 // *.mmd in the folder with their modified times; fs/promises has no stat.
 async function listed(dir) {
@@ -86,7 +105,10 @@ export async function load(dir, meta, now = Date.now()) {
   const keep = [];
   let unpinned = 0;
   for (const f of list) {
-    if (f.pinned || (now - f.touched <= KEEP_DAYS * DAY && unpinned++ < KEEP_COUNT)) keep.push(f);
+    const age = now - f.touched;
+    const kept = f.pinned || age <= DAY || (age <= KEEP_DAYS * DAY && unpinned < KEEP_COUNT);
+    if (!f.pinned) unpinned++;
+    if (kept) keep.push(f);
     else await fs.unlink(`${dir}/${f.file}`).catch(() => {});
   }
   const out = [];
@@ -98,7 +120,8 @@ export async function load(dir, meta, now = Date.now()) {
 }
 
 // Every project at once, when Blueprint starts: expired diagrams go, and so
-// does a project folder left with no diagram and not opened for KEEP_DAYS.
+// does a project folder left with no diagram and not opened or asked to draw
+// for KEEP_DAYS.
 export async function pruneAll(now = Date.now()) {
   let names = [];
   try {
@@ -110,7 +133,7 @@ export async function pruneAll(now = Date.now()) {
     const dir = `${projectsDir()}/${name}`;
     const meta = await readMeta(dir, null);
     const kept = await load(dir, meta, now);
-    if (kept.length || now - meta.opened <= KEEP_DAYS * DAY) continue;
+    if (kept.length || now - Math.max(meta.opened ?? 0, meta.asked ?? 0) <= KEEP_DAYS * DAY) continue;
     await fs.unlink(`${dir}/project.json`).catch(() => {});
     await fs.unlink(`${dir}/topic.txt`).catch(() => {});
     await fs.rmdir(dir).catch(() => {});

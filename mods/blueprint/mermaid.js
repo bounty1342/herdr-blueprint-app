@@ -35,9 +35,9 @@ export function parseFlowchart(src) {
   const g = { title: null, dir: "LR", nodes: new Map(), edges: [], src };
   const raw = src.split("\n");
   const lines = raw.map((l) => l.trim());
-  let i = 0;
-  if (lines[0] === "---") {
-    for (i = 1; i < lines.length && lines[i] !== "---"; i++) {
+  let i = Math.max(0, lines.findIndex(Boolean)); // blank lines may come first
+  if (lines[i] === "---") {
+    for (i++; i < lines.length && lines[i] !== "---"; i++) {
       const m = lines[i].match(/^title:\s*(.+)$/);
       if (m) g.title = unquote(m[1]);
     }
@@ -51,7 +51,8 @@ export function parseFlowchart(src) {
       continue;
     }
     if (!line || line.startsWith("%%")) continue;
-    if ((m = line.match(/^(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b/))) {
+    // The header; with no direction Mermaid draws top to bottom.
+    if ((m = line.match(/^(?:flowchart|graph)(?:\s+(LR|RL|TB|TD|BT)\b.*|\s*)$/))) {
       g.dir = m[1] === "LR" || m[1] === "RL" ? "LR" : "TB";
       continue;
     }
@@ -87,7 +88,10 @@ function readNode(g, s, pos, at) {
   const n = node(g, id);
   for (const [open, close, shape] of SHAPES) {
     if (!s.startsWith(open, pos)) continue;
-    const end = s.indexOf(close, pos + open.length);
+    // A quoted label may hold the closing bracket: a["arr[0]"], a("f()").
+    const q = /^\s*"/.exec(s.slice(pos + open.length));
+    const shut = q ? s.indexOf('"', pos + open.length + q[0].length) : -1;
+    const end = s.indexOf(close, shut >= 0 ? shut + 1 : pos + open.length);
     if (end < 0) break;
     const [title, ...rest] = unquote(s.slice(pos + open.length, end)).split(/<br\s*\/?>/i);
     Object.assign(n, { shape, title: title.trim(), sub: rest.join(" ").trim() || null });

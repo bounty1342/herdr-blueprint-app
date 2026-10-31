@@ -20,7 +20,8 @@ echo "synced -> $dst"
 [ "${1:-}" = "--watch" ] || exit 0
 last=""
 while :; do
-  now=$(find "$src" -type f ! -name 'gpui-kit.d.ts' ! -name 'jsconfig.json' -exec stat -f '%m %N' {} + | sort | shasum)
+  # Contents, not times: two saves in one second are both seen.
+  now=$(find "$src" -type f ! -name 'gpui-kit.d.ts' ! -name 'jsconfig.json' -exec shasum {} + | sort | shasum)
   if [ "$now" != "$last" ]; then
     [ -n "$last" ] && sync_once && echo "synced $(date +%T)"
     last=$now
