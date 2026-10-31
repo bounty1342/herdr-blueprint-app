@@ -353,8 +353,16 @@ export default class Blueprint extends View {
     return agent.status === "working" || recent ? agent : null;
   }
 
+  // From the panel: Blueprint moves into the tab as a pane beside its agent,
+  // and the panel closes (the same diagram twice only costs room, and CPU
+  // when both move). A Blueprint pane already in the tab gets the focus
+  // instead of a second one.
   openPane() {
-    run("pane.split", { direction: "right", pane: this.ctxPane ?? focused()?.pane ?? undefined, mod: MOD });
+    const tab = this.servedTab(panes());
+    const there = panes().find((p) => p.mod === MOD && p.tab === tab);
+    if (there) run("pane.focus", { pane: there.pane });
+    else run("pane.split", { direction: "right", pane: this.ctxPane ?? focused()?.pane ?? undefined, mod: MOD });
+    if (this.inPanel) run("layout.hide", { id: "panel" });
   }
 
   redraw(cx) {
