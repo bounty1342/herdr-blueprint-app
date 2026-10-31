@@ -15,16 +15,23 @@
 // Files and Changes (props {panel: true}, see scripts/add-button.sh). As a
 // panel it serves the tab on screen, and its dot runs while the pointer is on it.
 //
+// What it shows are the diagrams of the project the tab's terminal is in (its
+// git checkout, so each worktree has its own), kept in the app's data folder
+// by store.js: each *.mmd file there is one tab, redrawn when the agent saves
+// it. With none yet, it offers the agents in the tab; picking one connects it
+// and asks it to draw.
+//
 // Commands (keys.json or `herdr-app do blueprint.<name>`):
 //   fit, zoom-in, zoom-out, zoom-100, export, clear, tab-1..9, select-<node id>,
-//   edit, compose-<node id>, note-<text, _ for spaces>, send, cancel, target-<terminal>
+//   edit, compose-<node id>, note-<text, _ for spaces>, send, cancel, target-<terminal>,
+//   connect-<terminal>, pin, pane
 
 import { View, div, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, focused, knownAgents, exec, hc, home, notify, readTextFile, nextCommand } from "herdr";
+import { theme, settings, agents, panes, focused, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
-import { diagramsFor } from "./diagrams.js";
+import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
@@ -91,24 +98,45 @@ function inline(text) {
 // What a request from edit mode says: the box, where it is in the source, the
 // code it stands for, the person's note and what to do. Same wording as the
 // terminal Blueprint's point_prompt, so the Blueprint skill knows it.
-function pointPrompt(G, n, note) {
+// The diagram lives in a file the agent saves (see drawPrompt), so the
+// "send it back" step is: update that file.
+function pointPrompt(G, n, note, path) {
   const label = [n.title, n.sub].filter(Boolean).join(" ");
   const where = n.line ? `, line ${n.line}: ${inline(n.lineText)}` : "";
   const stands = n.ref ? ` It stands for \`${n.ref}\`.` : "";
   const work = "Make this change in the code there and anything that depends on it, run the tests, then ";
-  const todo = n.ref ? `${work}send the updated diagram to Blueprint.` : "Change it and anything it describes, then send the new version to Blueprint.";
+  const todo = n.ref ? `${work}update the diagram in \`${path}\`.` : `Change it and anything it describes, then update the diagram in \`${path}\`.`;
   const text = `In Blueprint I pointed at the box "${label}" in the diagram you sent ('${G.g.title ?? G.tab}')${where}.${stands}\n${note}\n${todo}\n${fenced(G.src, "mermaid")}\n`;
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+  return clean(text);
 }
+
+const clean = (text) => text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+const LANG_NAMES = { en: "English", ko: "Korean", ja: "Japanese" };
+
+// What a newly connected agent is asked: draw the code it is building into a
+// file of this project's folder, keep it current, mark the work in progress.
+function drawPrompt(dir, lang) {
+  return clean(`Blueprint (the Herdr app panel) is now connected to you for this project. Draw the code you are working on as a Mermaid flowchart and save it as a .mmd file in \`${dir}/\` (the folder exists; one file per diagram, a short kebab-case name such as \`auth-flow.mmd\`). Blueprint shows it as soon as it is saved.
+- Start the file with YAML frontmatter: \`title: ...\`. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class or route).
+- Every box is a piece of the code, not a step of your task. Tie each box to it: \`%% code: <node id> <path>:<line>\`.
+- Mark progress: \`class <ids> done\` for finished parts, \`class <ids> active\` for work in progress, \`class <id> current\` for what you are on right now.
+- After each unit of work, update that file in place (change only what changed). Skip it when the flow did not change. Diagrams nobody uses for ${KEEP_DAYS} days are deleted.
+`);
+}
+
+const EMPTY = { nodes: new Map(), edges: [], title: null, dir: "LR" };
 
 export default class Blueprint extends View {
   init(props, cx) {
     this.inPanel = !!props?.panel;
     this.tab = 0;
-    this.views = []; // per tab: {z, x, y} once moved by hand; empty means fit
-    this.dirs = []; // per tab: the direction last drawn
-    this.measured = {}; // "n:<tab>:<id>" / "e:<tab>:<index>" -> {w, h} at 100%
+    this.graphs = []; // the project's diagrams: { key (file), rev, tab, src, g, loaded, pinned }
+    this.views = {}; // per diagram file: {z, x, y} once moved by hand; none means fit
+    this.dirs = {}; // per diagram file: the direction last drawn
+    this.measured = {}; // "n:<file@rev>:<id>" / "e:<file@rev>:<index>" -> {w, h} at 100%
+    this.vers = {}; // per file@rev, bumped when its text is measured
     this.cache = new Map();
+    this.project = null; // { path, dir, meta, name }
     this.useLang("en");
     // Follow Claude Code's language, and look again now and then.
     const follow = (cx) => cx.spawn(async (cx) => {
@@ -153,15 +181,20 @@ export default class Blueprint extends View {
       } catch (_) {}
     });
     cx.timer.every(30000, (cx) => cx.notify()); // "N min ago"
+    // Which project: render notes the tab's terminal folder; this picks it up
+    // (git and file reads are async, which a render can't wait for).
+    cx.timer.every(700, (cx) => this.syncProject(cx));
+    cx.spawn(async () => {
+      try {
+        await pruneAll();
+      } catch (_) {}
+    });
     cx.spawn(async (cx) => {
       for (;;) {
         this.command(await nextCommand(), cx);
         this.redraw(cx);
       }
     });
-    // The first runs of the layout code are far slower than later ones; run
-    // them here, where no frame is waiting.
-    for (let i = 0; i < this.graphs.length; i++) for (const dir of ["LR", "TB"]) this.layoutFor(i, dir);
   }
 
   // The host sometimes drops a render ("interrupted"); the pane then keeps the
@@ -169,20 +202,139 @@ export default class Blueprint extends View {
   // happens most right after a reload, a resize or a new tab. A dropped render
   // leaves nothing behind, so a render marks itself done only at its end, and
   // until one does, keep asking (a few times, backing off).
-  // Language: UI text and the sample diagrams. Sizes and layouts belong to the
-  // text, so they start over.
   useLang(lang) {
     this.lang = lang;
     this.T = text(lang);
-    this.graphs = diagramsFor(lang).map((d) => ({ ...d, g: parseFlowchart(d.src), loaded: Date.now() }));
-    this.measured = {};
-    this.vers = this.graphs.map(() => 0); // per tab, bumped when its text is measured
-    this.cache.clear();
-    this.views = [];
-    this.dirs = [];
-    this.selected = null;
-    this.compose = null;
-    this.tab = Math.min(this.tab ?? 0, this.graphs.length - 1);
+  }
+
+  // --- project -------------------------------------------------------------
+
+  syncProject(cx) {
+    if (!this.ctxPending || this.syncing) return;
+    this.ctxPending = false;
+    this.syncing = true;
+    cx.spawn(async (cx) => {
+      try {
+        await this.openProject(this.ctxCwd, cx);
+      } catch (_) {}
+      this.syncing = false;
+    });
+  }
+
+  async openProject(cwd, cx) {
+    const path = cwd ? await checkoutOf(cwd) : null;
+    if (path === (this.project?.path ?? null)) return;
+    this.watchGen = (this.watchGen ?? 0) + 1; // stops the old folder's watch
+    this.waiting = null;
+    if (!path) {
+      this.project = null;
+      this.setDiagrams([]);
+      return this.redraw(cx);
+    }
+    const dir = projectDir(path);
+    const meta = await readMeta(dir, path);
+    meta.opened = Date.now();
+    await writeMeta(dir, meta);
+    this.project = { path, dir, meta, name: path.split("/").filter(Boolean).pop() ?? path };
+    await this.reload(cx);
+    const gen = this.watchGen;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        let changed;
+        try {
+          changed = await watchFolder(dir);
+        } catch (_) {
+          return;
+        }
+        if (gen !== this.watchGen) return;
+        // Blueprint's own bookkeeping (project.json) is not news.
+        if (changed.every((f) => f.endsWith("project.json"))) continue;
+        await this.reload(cx);
+      }
+    });
+  }
+
+  async reload(cx) {
+    const p = this.project;
+    if (!p) return;
+    const items = await load(p.dir, p.meta);
+    if (p !== this.project) return;
+    this.setDiagrams(items);
+    if (this.graphs.length) this.waiting = null;
+    this.markSeen(cx);
+    this.redraw(cx);
+  }
+
+  // Files in a stable order (by name); a changed file gets a new rev, which
+  // re-measures it and starts its view from fit. The shown one stays shown,
+  // else the most recently updated one is.
+  setDiagrams(items) {
+    const before = new Map(this.graphs.map((d) => [d.key, d]));
+    const shown = this.graphs[this.tab]?.key;
+    this.graphs = [...items].sort((a, b) => a.file.localeCompare(b.file)).map((f) => {
+      const old = before.get(f.file);
+      const rev = !old ? 0 : old.src === f.src ? old.rev : old.rev + 1;
+      if (old && rev !== old.rev) delete this.views[f.file];
+      const g = old && rev === old.rev ? old.g : parseFlowchart(f.src);
+      return { key: f.file, rev, src: f.src, g, tab: g.title ?? f.file.replace(/\.mmd$/, ""), loaded: f.mtime, pinned: f.pinned };
+    });
+    const newest = items[0]?.file;
+    const i = this.graphs.findIndex((d) => d.key === shown);
+    this.tab = i >= 0 ? i : Math.max(0, this.graphs.findIndex((d) => d.key === newest));
+    if (this.selected && !this.graph.nodes.has(this.selected)) this.selected = null;
+    if (this.compose && !this.graph.nodes.has(this.compose.id)) this.compose = null;
+  }
+
+  // Looking at a diagram keeps it: its "seen" time pushes back the deletion.
+  markSeen(cx) {
+    const p = this.project, d = this.graphs[this.tab];
+    if (!p || !d || Date.now() - (p.meta.seen[d.key] ?? 0) < 60000) return;
+    p.meta.seen[d.key] = Date.now();
+    cx.spawn(async () => {
+      try {
+        await writeMeta(p.dir, p.meta);
+      } catch (_) {}
+    });
+  }
+
+  togglePin(cx) {
+    const p = this.project, d = this.graphs[this.tab];
+    if (!p || !d) return;
+    const pinned = new Set(p.meta.pinned);
+    if (pinned.has(d.key)) pinned.delete(d.key);
+    else pinned.add(d.key);
+    p.meta.pinned = [...pinned];
+    d.pinned = pinned.has(d.key);
+    cx.spawn(async () => {
+      try {
+        await writeMeta(p.dir, p.meta);
+      } catch (_) {}
+    });
+  }
+
+  // Connect an agent to this project and ask it to draw.
+  connect(target, cx) {
+    const p = this.project;
+    if (!p || !target) return;
+    p.meta.agent = target.address;
+    this.target = null;
+    this.waiting = { name: target.name };
+    cx.spawn(async (cx) => {
+      try {
+        await writeMeta(p.dir, p.meta);
+        const r = await hc(["send", target.address, drawPrompt(p.dir, this.lang)]);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
+        notify({ title: this.T.asked(target.name), body: p.path, level: "success", timeout: 4000 });
+      } catch (err) {
+        this.waiting = null;
+        notify({ title: this.T.sendFailed, body: String(err?.message ?? err), level: "error" });
+      }
+      this.redraw(cx);
+    });
+  }
+
+  openPane() {
+    run("pane.split", { direction: "right", pane: this.ctxPane ?? focused()?.pane ?? undefined, mod: MOD });
   }
 
   redraw(cx) {
@@ -208,11 +360,21 @@ export default class Blueprint extends View {
   // --- model -------------------------------------------------------------
 
   get graph() {
-    return this.graphs[this.tab].g;
+    return this.graphs[this.tab]?.g ?? EMPTY;
+  }
+
+  // Sizes and layouts belong to one version of one file.
+  mkey(i) {
+    const d = this.graphs[i];
+    return `${d.key}@${d.rev}`;
+  }
+
+  get vkey() {
+    return this.graphs[this.tab]?.key ?? "";
   }
 
   labelBox(i, n) {
-    return this.measured[`n:${i}:${n.id}`] ?? {
+    return this.measured[`n:${this.mkey(i)}:${n.id}`] ?? {
       w: Math.max(estimate(n.title, TITLE), estimate(n.sub, SUB)),
       h: TITLE * 1.3 + (n.sub ? SUB * 1.3 + 2 : 0),
     };
@@ -220,11 +382,11 @@ export default class Blueprint extends View {
 
   edgeLabelBox(i, e) {
     const k = this.graphs[i].g.edges.indexOf(e);
-    return this.measured[`e:${i}:${k}`] ?? { w: estimate(e.label, LABEL) + 10, h: LABEL * 1.4 + 4 };
+    return this.measured[`e:${this.mkey(i)}:${k}`] ?? { w: estimate(e.label, LABEL) + 10, h: LABEL * 1.4 + 4 };
   }
 
   layoutFor(i, dir) {
-    const key = `${i}:${dir}:${this.vers[i]}`;
+    const key = `${this.mkey(i)}:${dir}:${this.vers[this.mkey(i)] ?? 0}`;
     if (!this.cache.has(key)) {
       if (this.cache.size > 24) this.cache.clear();
       const g = this.graphs[i].g;
@@ -250,12 +412,12 @@ export default class Blueprint extends View {
 
   current() {
     const dir = this.direction(this.tab);
-    if (this.dirs[this.tab] !== dir) {
-      this.dirs[this.tab] = dir;
-      this.views[this.tab] = null; // a new shape: start from fit
+    if (this.dirs[this.vkey] !== dir) {
+      this.dirs[this.vkey] = dir;
+      delete this.views[this.vkey]; // a new shape: start from fit
     }
     const L = this.layoutFor(this.tab, dir);
-    return { L, dir, v: this.views[this.tab] ?? this.fitView(L) };
+    return { L, dir, v: this.views[this.vkey] ?? this.fitView(L) };
   }
 
   // A node's whole flow: everything upstream and downstream of it.
@@ -321,21 +483,23 @@ export default class Blueprint extends View {
     return list;
   }
 
+  // An agent picked here wins, then the one connected to this project, then
+  // the most recent one in the tab.
   pickTarget(list) {
     if (this.target) return list.find((x) => x.address === this.target) ?? { address: this.target, name: this.target, status: null };
-    return list[0] ?? null;
+    return list.find((x) => x.address === this.project?.meta.agent) ?? list[0] ?? null;
   }
 
   // --- actions -----------------------------------------------------------
 
   command(c, cx) {
-    if (c === "fit") this.views[this.tab] = null;
+    if (c === "fit") this.views[this.vkey] = null;
     else if (c === "zoom-in") this.zoomCenter(1.25);
     else if (c === "zoom-out") this.zoomCenter(0.8);
-    else if (c === "zoom-100") this.zoomCenter(1 / this.current().v.z);
+    else if (c === "zoom-100") this.graphs.length && this.zoomCenter(1 / this.current().v.z);
     else if (c === "clear") this.selected = null;
     else if (c === "export") this.exportPng(cx);
-    else if (/^tab-\d$/.test(c)) this.setTab(Number(c.slice(4)) - 1);
+    else if (/^tab-\d$/.test(c)) this.setTab(Number(c.slice(4)) - 1, cx);
     else if (c.startsWith("select-")) this.selected = c.slice(7);
     else if (c === "edit") this.setEditing(!this.editing);
     else if (c.startsWith("compose-")) this.openCompose(c.slice(8));
@@ -343,6 +507,10 @@ export default class Blueprint extends View {
     else if (c === "send") this.send(cx);
     else if (c === "cancel") this.closeCompose();
     else if (c.startsWith("target-")) this.target = c.slice(7) || null;
+    else if (c.startsWith("connect-")) this.connect(this.targets().find((x) => x.address === c.slice(8)) ?? { address: c.slice(8), name: c.slice(8) }, cx);
+    else if (c === "pin") this.togglePin(cx);
+    else if (c === "pane") this.openPane();
+    else if (c === "reload") cx.spawn(async (cx) => this.reload(cx));
     else if (c === "lang-auto") this.langForced = false;
     else if (/^lang-(en|ko|ja)$/.test(c)) {
       this.langForced = true;
@@ -384,7 +552,7 @@ export default class Blueprint extends View {
       notify({ title: this.T.noTarget, body: this.T.noAgentBody, level: "warning", timeout: 4000 });
       return;
     }
-    const text = pointPrompt(this.graphs[this.tab], n, note);
+    const text = pointPrompt(this.graphs[this.tab], n, note, `${this.project?.dir}/${this.vkey}`);
     this.sending = true;
     this.redraw(cx);
     cx.spawn(async (cx) => {
@@ -405,16 +573,19 @@ export default class Blueprint extends View {
     });
   }
 
-  setTab(i) {
+  setTab(i, cx) {
     if (i < 0 || i >= this.graphs.length) return;
     this.tab = i;
     this.selected = null;
+    this.compose = null;
+    if (cx) this.markSeen(cx);
   }
 
   zoomAt(f, px, py) {
+    if (!this.graphs.length) return;
     const { v } = this.current();
     const z = clamp(v.z * f), k = z / v.z;
-    this.views[this.tab] = { z, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
+    this.views[this.vkey] = { z, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
   }
 
   zoomCenter(f) {
@@ -431,18 +602,18 @@ export default class Blueprint extends View {
   // Fit, wait for that frame, take the window's frame and keep the canvas part.
   // Saved to ~/Downloads and put on the clipboard.
   exportPng(cx) {
-    if (this.exporting || !this.size) return;
+    if (this.exporting || !this.size || !this.graphs.length) return;
     if (!this.bounds) {
       return notify({ title: "PNG", body: this.T.pngHover, level: "info", timeout: 4000 });
     }
-    const saved = { view: this.views[this.tab], selected: this.selected, hovered: this.hovered };
+    const saved = { view: this.views[this.vkey], selected: this.selected, hovered: this.hovered };
     Object.assign(this, { exporting: true, selected: null, hovered: null });
-    this.views[this.tab] = null;
+    this.views[this.vkey] = null;
     this.redraw(cx);
     const done = (cx) => {
       this.exporting = false;
       this.selected = saved.selected;
-      this.views[this.tab] = saved.view;
+      this.views[this.vkey] = saved.view;
       this.redraw(cx);
     };
     cx.timer.after(250, (cx) => cx.spawn(async (cx) => {
@@ -483,6 +654,18 @@ export default class Blueprint extends View {
     const all = panes();
     this.paneFocused = this.inPanel ? !!this.hovering : !!all.find((p) => p.mod === MOD)?.focused;
     this.targetList = this.targets(all);
+    // The project follows the tab's terminal folder: the connected agent's,
+    // else an agent's, else any terminal's there. syncProject does the rest.
+    const tabId = this.inPanel ? focused()?.tab : all.find((p) => p.mod === MOD)?.tab;
+    const terms = all.filter((p) => p.terminal && p.tab === tabId);
+    const pick = terms.find((p) => p.terminal === this.project?.meta.agent)
+      ?? terms.find((p) => this.targetList.some((x) => x.address === p.terminal)) ?? terms[0];
+    this.ctxPane = pick?.pane ?? null;
+    this.ctxBranch = pick?.branch ?? null;
+    if ((pick?.cwd ?? null) !== this.ctxCwd || this.ctxCwd === undefined) {
+      this.ctxCwd = pick?.cwd ?? null;
+      this.ctxPending = true;
+    }
     const G = this.graphs[this.tab];
     const narrow = this.width > 0 && this.width < 420;
     return v_flex()
@@ -516,7 +699,7 @@ export default class Blueprint extends View {
         else if (k === "0") this.command("zoom-100", cx);
         else if (k === "=" || k === "shift-=") this.command("zoom-in", cx);
         else if (k === "-") this.command("zoom-out", cx);
-        else if (/^[1-9]$/.test(k)) this.setTab(Number(k) - 1);
+        else if (/^[1-9]$/.test(k)) this.setTab(Number(k) - 1, cx);
         else return;
         cx.stop_propagation();
         this.redraw(cx);
@@ -529,6 +712,15 @@ export default class Blueprint extends View {
   }
 
   header(t, pal, G, narrow) {
+    const small = (id, label, on, onClick) => div().id(id).flex_none().h(26).px(10).flex().items_center().rounded(6).border(1)
+      .text_size(12).cursor_pointer().border_color(on ? alpha(t.accent, 0.6) : t.border).text_color(on ? t.accent : t.foreground)
+      .when(on, (el) => el.bg(alpha(t.accent, 0.16)))
+      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_click((_e, cx) => {
+        onClick(cx);
+        this.redraw(cx);
+      })
+      .child(label);
     const a = this.pickTarget(this.targetList);
     const c = a ? { working: pal.active, blocked: t.blocked, done: pal.done }[a.status] ?? t.muted : t.dim;
     const T = this.T, said = a?.status ? T.status[a.status] : null;
@@ -538,10 +730,13 @@ export default class Blueprint extends View {
       .child(div().text_size(12).text_color(c).child(label));
     return h_flex().h(HEADER_H).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
       .when(!narrow, (el) => el.child(div().flex_none().text_color(t.muted).child("Blueprint")))
-      .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(G.g.title ?? G.tab))
+      .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground)
+        .child(G ? G.g.title ?? G.tab : this.project?.name ?? T.noProject))
       .child(pill)
-      .child(div().flex_none().text_size(12).text_color(t.muted).child(T.ago(minutesSince(G.loaded))))
-      .child(div().id("bp-edit").flex_none().h(26).px(10).flex().items_center().rounded(6).border(1).text_size(12)
+      .when(!!G && !narrow, (el) => el.child(div().flex_none().text_size(12).text_color(t.muted).child(T.ago(minutesSince(G.loaded)))))
+      .when(!!G, (el) => el.child(small("bp-pin", G.pinned ? T.pinned : T.pin, G.pinned, (cx) => this.togglePin(cx))))
+      .when(this.inPanel && !narrow, (el) => el.child(small("bp-pane", T.openPane, false, () => this.openPane())))
+      .when(!!G, (el) => el.child(div().id("bp-edit").flex_none().h(26).px(10).flex().items_center().rounded(6).border(1).text_size(12)
         .cursor_pointer().border_color(this.editing ? alpha(t.accent, 0.6) : t.border)
         .text_color(this.editing ? t.accent : t.foreground)
         .when(this.editing, (el) => el.bg(alpha(t.accent, 0.16)))
@@ -550,11 +745,14 @@ export default class Blueprint extends View {
           this.setEditing(!this.editing);
           this.redraw(cx);
         })
-        .child(this.editing ? T.editing : T.edit));
+        .child(this.editing ? T.editing : T.edit)));
   }
 
   tabs(t) {
-    return h_flex().h(TABS_H).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border)
+    const p = this.project;
+    const where = p ? [p.name, this.ctxBranch].filter(Boolean).join(" · ") : null;
+    return h_flex().h(TABS_H).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
+      .when(!!where, (el) => el.child(div().flex_none().max_w(180).truncate().px(8).text_size(11.5).font_family(this.mono).text_color(t.dim).child(where)))
       .children(this.graphs.map((d, i) => {
         const on = i === this.tab;
         return div().id(`bp-tab-${i}`).px(10).py(4).rounded(6).text_size(12).cursor_pointer()
@@ -562,10 +760,11 @@ export default class Blueprint extends View {
           .when(on, (el) => el.bg(t.raised))
           .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
           .on_click((_e, cx) => {
-            this.setTab(i);
+            this.setTab(i, cx);
             this.redraw(cx);
           })
-          .child(d.tab);
+          .max_w(200).truncate()
+          .child(d.pinned ? `● ${d.tab}` : d.tab);
       }));
   }
 
@@ -579,13 +778,15 @@ export default class Blueprint extends View {
         this.redraw(cx);
       })
       .on_scroll_wheel((e, cx) => {
+        if (!this.graphs.length) return;
         const v = this.current().v;
         const p = e.local_position ?? (e.bounds ? { x: e.position.x - e.bounds.x, y: e.position.y - e.bounds.y } : { x: this.size.width / 2, y: this.size.height / 2 });
         if (e.modifiers.control || e.modifiers.platform) this.zoomAt(Math.exp(e.delta.y * 0.003), p.x, p.y);
-        else this.views[this.tab] = { ...v, x: v.x + e.delta.x, y: v.y + e.delta.y };
+        else this.views[this.vkey] = { ...v, x: v.x + e.delta.x, y: v.y + e.delta.y };
         this.redraw(cx);
       })
       .on_mouse_down("left", (e) => {
+        if (!this.graphs.length) return;
         this.drag = { x: e.position.x, y: e.position.y, v: { ...this.current().v }, moved: false };
       })
       .on_mouse_move((e, cx) => {
@@ -594,7 +795,7 @@ export default class Blueprint extends View {
         const dx = e.position.x - d.x, dy = e.position.y - d.y;
         if (!d.moved && Math.hypot(dx, dy) < 3) return;
         d.moved = true;
-        this.views[this.tab] = { ...d.v, x: d.v.x + dx, y: d.v.y + dy };
+        this.views[this.vkey] = { ...d.v, x: d.v.x + dx, y: d.v.y + dy };
         this.redraw(cx);
       })
       .on_mouse_up("left", (_e, cx) => {
@@ -607,12 +808,42 @@ export default class Blueprint extends View {
         if (!h) this.drag = null;
       });
     if (!this.size) return el;
+    if (!this.graphs.length) return el.child(this.emptyCard(t));
     return el.children(this.drawing(t, pal))
       .when(this.editing, (el) => el.child(h_flex().absolute().left(12).top(12).gap(6).px(10).h(26).items_center().rounded(6)
         .bg(alpha(t.accent, 0.16)).border(1).border_color(alpha(t.accent, 0.5)).text_size(12).text_color(t.accent)
         .child(div().font_semibold().child(this.T.editMode))
         .child(div().text_color(t.muted).child(this.compose ? this.T.enterSend : this.T.pickNode))))
       .when(!!this.compose, (el) => el.child(this.composer(t)));
+  }
+
+  // No diagram yet: the agents in the tab, to connect one and have it draw.
+  emptyCard(t) {
+    const T = this.T, p = this.project, list = this.targetList ?? [];
+    const W = this.size.width, cw = Math.min(440, W - 32);
+    const body = v_flex().w(cw).gap(10).p(18).rounded(12).bg(t.background).border(1).border_color(t.border)
+      .child(div().text_size(14).font_semibold().text_color(t.foreground).child(p ? T.emptyTitle : T.noProject));
+    if (!p) return div().absolute().inset_0().flex().items_center().justify_center().child(body);
+    const where = [p.path, this.ctxBranch].filter(Boolean).join(" · ");
+    let out = body.child(div().text_size(11).font_family(this.mono).text_color(t.dim).truncate().child(where));
+    if (this.waiting) {
+      out = out.child(div().pt(4).text_size(12.5).text_color(t.accent).child(T.asked(this.waiting.name)))
+        .child(div().text_size(12).text_color(t.muted).child(T.waitingBody));
+    } else if (list.length) {
+      out = out.child(div().pt(4).text_size(12.5).text_color(t.muted).child(T.pickAgent))
+        .child(v_flex().gap(6).children(list.map((a, i) => h_flex().id(`bp-agent-${i}`).h(34).px(12).gap(8).items_center().rounded(8)
+          .border(1).border_color(t.input).bg(t.raised).cursor_pointer().hover((s) => s.border_color(t.accent))
+          .on_click((_e, cx) => {
+            this.connect(a, cx);
+            this.redraw(cx);
+          })
+          .child(div().flex_1().text_size(13).text_color(t.foreground).child(a.name))
+          .child(div().text_size(11).font_family(this.mono).text_color(t.dim).child(a.address)))));
+    } else {
+      out = out.child(div().pt(4).text_size(12.5).text_color(t.muted).child(T.noAgentHere));
+    }
+    out = out.child(div().pt(6).text_size(11).text_color(t.dim).child(`${T.emptyHint} · ${T.keepHint}`));
+    return div().absolute().inset_0().flex().items_center().justify_center().child(out);
   }
 
   // The request box: which node, who gets it, what to change.
@@ -785,39 +1016,40 @@ export default class Blueprint extends View {
       // Another font: every size is stale.
       this.measuredFont = mono;
       this.measured = {};
-      this.vers = this.vers.map((v) => v + 1);
+      for (const k of Object.keys(this.vers)) this.vers[k]++;
     }
-    const missing = (i) => [...this.graphs[i].g.nodes.keys()].some((id) => !this.measured[`n:${i}:${id}`])
-      || this.graphs[i].g.edges.some((e, k) => e.label && !this.measured[`e:${i}:${k}`]);
+    const missing = (i) => [...this.graphs[i].g.nodes.keys()].some((id) => !this.measured[`n:${this.mkey(i)}:${id}`])
+      || this.graphs[i].g.edges.some((e, k) => e.label && !this.measured[`e:${this.mkey(i)}:${k}`]);
+    if (!this.graphs.length) return els;
     const order = [this.tab, ...this.graphs.keys()].filter((i, k, a) => a.indexOf(i) === k);
     const next = order.find(missing);
     if (next === undefined) return els;
     [next].forEach((i) => {
-      const { g } = this.graphs[i];
+      const { g } = this.graphs[i], mk = this.mkey(i);
       for (const n of g.nodes.values()) {
-        const key = `n:${i}:${n.id}`;
+        const key = `n:${mk}:${n.id}`;
         if (this.measured[key]) continue;
         els.push(v_flex().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).items_center().gap(2)
           .child(div().whitespace_nowrap().text_size(TITLE).font_semibold().child(n.title))
           .when(!!n.sub, (el) => el.child(div().whitespace_nowrap().text_size(SUB).font_family(mono).child(n.sub)))
-          .on_size_change((s, cx) => this.measure(key, s, cx)));
+          .on_size_change((s, cx) => this.measure(key, mk, s, cx)));
       }
       g.edges.forEach((e, k) => {
-        const key = `e:${i}:${k}`;
+        const key = `e:${mk}:${k}`;
         if (!e.label || this.measured[key]) return;
         els.push(div().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).px(5).py(1).whitespace_nowrap().text_size(LABEL)
-          .child(e.label).on_size_change((s, cx) => this.measure(key, s, cx)));
+          .child(e.label).on_size_change((s, cx) => this.measure(key, mk, s, cx)));
       });
     });
     return els;
   }
 
   // Sizes arrive one callback per element in the same frame; draw once for all.
-  measure(key, s, cx) {
+  measure(key, mk, s, cx) {
     const old = this.measured[key];
     if (old && Math.abs(old.w - s.width) < 0.5 && Math.abs(old.h - s.height) < 0.5) return;
     this.measured[key] = { w: s.width, h: s.height };
-    this.vers[Number(key.split(":")[1])]++;
+    this.vers[mk] = (this.vers[mk] ?? 0) + 1;
     if (this.measurePending) return;
     this.measurePending = true;
     cx.timer.after(16, (cx) => {
@@ -910,8 +1142,9 @@ export default class Blueprint extends View {
 
   footer(t, narrow) {
     const n = this.selected ? this.graph.nodes.get(this.selected) : null;
-    const { v } = this.size ? this.current() : { v: { z: 1 } };
-    const fitted = !this.views[this.tab];
+    const has = this.graphs.length > 0;
+    const { v } = this.size && has ? this.current() : { v: { z: 1 } };
+    const fitted = !this.views[this.vkey];
     const button = (id, label, onClick, extra = (el) => el) =>
       extra(div().id(id).h(26).px(10).flex().items_center().rounded(6).border(1).border_color(t.border).text_size(12)
         .text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -938,9 +1171,10 @@ export default class Blueprint extends View {
         .child(this.editing ? this.T.hintEditing : narrow ? this.T.hintNarrow : this.T.hint);
     return h_flex().h(FOOTER_H).flex_none().px(12).gap(6).items_center().border_t(1).border_color(t.border)
       .child(info)
-      .child(button("bp-fit", this.T.fit, (cx) => this.command("fit", cx), (el) => el.when(fitted, (e) => e.text_color(t.muted))))
-      .child(zoom)
-      .child(button("bp-png", this.exporting ? this.T.saving : "PNG", (cx) => this.exportPng(cx)));
+      .when(has, (el) => el
+        .child(button("bp-fit", this.T.fit, (cx) => this.command("fit", cx), (e) => e.when(fitted, (e) => e.text_color(t.muted))))
+        .child(zoom)
+        .child(button("bp-png", this.exporting ? this.T.saving : "PNG", (cx) => this.exportPng(cx))));
   }
 }
 
