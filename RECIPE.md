@@ -30,6 +30,7 @@ With no diagram yet, a centred 440px card says "No diagram for this project yet"
 - **Clicks.** A box: its whole upstream and downstream flow stays lit, the rest drops to 28% (fading 160 ms), lit edges go to 2px `foreground`. Again on it, or empty canvas: back. Drag pans; ⌘/Ctrl + scroll zooms around the pointer (20% to 300%); the view starts fitted (at most 140%) and refits when the file changes. If the other direction (LR vs TB) fits the pane at least 20% larger, it is drawn that way.
 - **Keys** (also with a Korean or Japanese input source on): `E` with a box picked opens its request box, without one toggles edit mode (a click then opens the request box); `Esc` closes the request, then edit mode, then the selection; `F` fit; `0` 100%; `=`/`-` zoom; `1` to `9` tabs.
 - **Request box.** 560px max, 12px above the canvas bottom, `popover` with an `accent` border at 60%: the box title and code path, a chip "→ Claude Code ⇄" that cycles the tab's agents, and an input ("What should change? e.g. add rate limiting here"). Enter sends "In Blueprint I pointed at the box …" with the box's line in the source, its `%% code` path, the note, what to do (change the code, run the tests, update the diagram file, don't use herdr-blueprint send) and the whole Mermaid source. The note stays if sending fails.
+- **New files.** A diagram file Blueprint hasn't seen before (the agent started one for the feature it is building) becomes the shown tab, unless a box is picked or a request is being written.
 - **`+`.** The same box with "New diagram", suggestion chips (The data model, The API request flow, The whole project's structure, This feature in detail:) and a prompt naming the files not to overwrite. The new file opens as a tab when it arrives.
 - **Keeping.** A file's time is when Blueprint first saw its current text, or when it was last shown, whichever is later. Unpinned files go after 7 days; past a day old, a project keeps 10. A project folder with no diagram, not opened or asked for 7 days, is removed when Blueprint starts. Folders are made only when an agent is connected or a diagram is asked for.
 - **Language.** English by default; Korean or Japanese when `~/.claude/settings.json` has `language` set to one of them (checked every 60 s). Commands `lang-en`, `lang-ko`, `lang-ja`, `lang-auto`.
@@ -56,6 +57,8 @@ With no diagram yet, a centred 440px card says "No diagram for this project yet"
 - Two identical arrow heads in one fill path cancel out (even-odd); dedupe tips.
 - A symlinked mod folder doesn't hot-reload; copy files in.
 - Text sizes are measured with invisible elements (one tab per render) before layout; until then they are estimated (CJK characters count as wide).
+- `fs/promises` reads only inside the home folder (and writes only under the app folder): an app folder outside home (`HERDR_APP_HOME=/Users/Shared/...`) shows no diagrams. `readTextFile` reads anywhere.
+- A covered or locked window isn't redrawn, and `herdr-app shot` keeps returning its last frame: record demos with the window in front.
 - Not tested on Windows or Linux yet. PNG export is macOS only.
 
 ## Done when
@@ -67,4 +70,5 @@ With no diagram yet, a centred 440px card says "No diagram for this project yet"
 - A second Blueprint pane in another tab shows that tab's project, not the first one's.
 - Pinning in one Blueprint and reloading the project in another keeps the pin in `project.json`.
 - Visiting tabs without connecting creates no folder under `data/blueprint/projects/`.
+- A new `.mmd` saved by the agent while nothing is picked becomes the shown tab.
 - `herdr-app do blueprint.add-button` adds a Blueprint button after Changes and switches to `main-blueprint`; `remove-button` returns to the previous layout and deletes `main-blueprint.json` and `mods/tabs-blueprint`.

@@ -417,6 +417,11 @@ export default class Blueprint extends View {
     if (arrived >= 0) {
       this.tab = arrived;
       this.expectNew = null;
+    } else if (before.size && !this.selected && !this.compose) {
+      // A diagram the agent started on its own (say, for the feature it is
+      // building now): show it, unless the person is busy with this one.
+      const added = items.find((f) => !before.has(f.file));
+      if (added) this.tab = this.graphs.findIndex((d) => d.key === added.file);
     }
     // Another diagram on screen: what was picked or written was about the old one.
     if (this.graphs[this.tab]?.key !== shown) {

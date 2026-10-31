@@ -1,0 +1,232 @@
+{
+  "hero": {
+    "out": "../../docs/media/point-and-ask",
+    "size": [
+      1280,
+      800
+    ],
+    "fps": 10,
+    "parts": [
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "to": 1793454350800,
+        "crop": [
+          1180,
+          560,
+          1380,
+          862
+        ]
+      },
+      {
+        "zoom": [
+          0,
+          0,
+          2560,
+          1600
+        ],
+        "seconds": 0.8
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "from": 1793454350800,
+        "to": 1793454353500
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "from": 1793454353500,
+        "to": 1793454423800,
+        "seconds": 3.5
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "from": 1793454423800,
+        "to": 1793454426000
+      },
+      {
+        "zoom": [
+          1560,
+          590,
+          1000,
+          625
+        ],
+        "seconds": 1.0
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "from": 1793454426000,
+        "to": 1793454430000
+      }
+    ],
+    "hold": 3
+  },
+  "connect": {
+    "out": "../../docs/media/connect",
+    "size": [
+      630,
+      712
+    ],
+    "fps": 10,
+    "parts": [
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/connect",
+        "to": 1793454197871,
+        "crop": [
+          1290,
+          100,
+          1260,
+          1424
+        ]
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/connect",
+        "from": 1793454197871,
+        "to": 1793454225179,
+        "seconds": 3
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/connect",
+        "from": 1793454225179
+      }
+    ],
+    "hold": 2.5
+  },
+  "new": {
+    "out": "../../docs/media/new-diagram",
+    "size": [
+      630,
+      712
+    ],
+    "fps": 10,
+    "parts": [
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/new",
+        "to": 1793454281142,
+        "crop": [
+          1290,
+          100,
+          1260,
+          1424
+        ]
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/new",
+        "from": 1793454281142,
+        "to": 1793454297829,
+        "seconds": 2.5
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/new",
+        "from": 1793454297829
+      }
+    ],
+    "hold": 2.5
+  },
+  "progress": {
+    "out": "../../docs/media/progress",
+    "size": [
+      630,
+      712
+    ],
+    "fps": 10,
+    "parts": [
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/progress4",
+        "from": 1793456197000,
+        "to": 1793456215000,
+        "crop": [
+          1290,
+          100,
+          1260,
+          1424
+        ],
+        "seconds": 3
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/progress4",
+        "from": 1793456215000,
+        "seconds": 9
+      }
+    ],
+    "hold": 2.5
+  },
+  "data-model": {
+    "out": "../../docs/media/data-model",
+    "size": [
+      960,
+      480
+    ],
+    "still": "/Users/Shared/blueprint-demo-rec/connect/1793454228844.png",
+    "crop": [
+      1340,
+      600,
+      1150,
+      575
+    ]
+  },
+  "flow": {
+    "out": "../../docs/media/flow",
+    "size": [
+      624,
+      600
+    ],
+    "still": "/Users/Shared/blueprint-demo-rec/hero/1793454342420.png",
+    "crop": [
+      1400,
+      380,
+      1040,
+      1000
+    ]
+  },
+  "preview": {
+    "out": "../../preview",
+    "size": [
+      1280,
+      800
+    ],
+    "still": "/Users/Shared/blueprint-demo-rec/hero/1793454429280.png"
+  },
+  "ask": {
+    "out": "../../docs/media/ask",
+    "size": [
+      960,
+      600
+    ],
+    "still": "/Users/Shared/blueprint-demo-rec/hero/1793454348633.png",
+    "crop": [
+      1180,
+      560,
+      1380,
+      862
+    ]
+  },
+  "dot": {
+    "out": "../../docs/media/dot",
+    "size": [
+      960,
+      600
+    ],
+    "fps": 14,
+    "parts": [
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/dot4",
+        "from": 1793456758329,
+        "to": 1793456764329,
+        "crop": [
+          1660,
+          600,
+          720,
+          450
+        ]
+      }
+    ],
+    "hold": 0
+  },
+  "panel": {
+    "out": "../../docs/media/panel",
+    "size": [
+      1280,
+      800
+    ],
+    "still": "/Users/Shared/blueprint-demo-rec/panel2/1793456773929.png"
+  }
+}
