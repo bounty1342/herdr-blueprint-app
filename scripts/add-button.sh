@@ -29,6 +29,15 @@ if '"blueprint"' not in s:
     s = s.replace(changes, changes + '\n      .child(panelButton("blueprint", "Blueprint", "mods/blueprint/icon.svg"))', 1)
     open(p, "w").write(s)
 
+# The side panel is remembered per tab instead of per space: Blueprint belongs
+# to the tab (its agent) it was opened in, so another tab starts closed.
+if "panelKey" not in s:
+    call = "this.syncPanel(space, panel, body, enabled);"
+    if call not in s:
+        sys.exit("tabs-blueprint: the tab bar changed in this Herdr version; make the panel per tab by hand")
+    s = s.replace(call, 'const panelKey = space && { id: `${space.id}/${space.tabs?.find((t) => t.active)?.id}` }; // per tab\n    this.syncPanel(panelKey, panel, body, enabled);', 1)
+    open(p, "w").write(s)
+
 # The layout: the cloned tab bar, and Blueprint as a third panel.
 p = f"{home}/layouts/main-blueprint.json"
 d = json.load(open(p))

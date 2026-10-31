@@ -28,7 +28,7 @@
 
 import { View, div, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, focused, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
+import { theme, settings, agents, panes, spaces, focused, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
 import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
@@ -223,12 +223,16 @@ export default class Blueprint extends View {
 
   async openProject(cwd, cx) {
     const path = cwd ? await checkoutOf(cwd) : null;
-    if (path === (this.project?.path ?? null)) return;
+    if (path === (this.project?.path ?? null)) {
+      this.loading = false;
+      return this.redraw(cx);
+    }
     this.watchGen = (this.watchGen ?? 0) + 1; // stops the old folder's watch
     this.waiting = null;
     if (!path) {
       this.project = null;
       this.setDiagrams([]);
+      this.loading = false;
       return this.redraw(cx);
     }
     const dir = projectDir(path);
@@ -237,6 +241,8 @@ export default class Blueprint extends View {
     await writeMeta(dir, meta);
     this.project = { path, dir, meta, name: path.split("/").filter(Boolean).pop() ?? path };
     await this.reload(cx);
+    this.loading = false;
+    this.redraw(cx);
     const gen = this.watchGen;
     cx.spawn(async (cx) => {
       for (;;) {
@@ -469,9 +475,14 @@ export default class Blueprint extends View {
 
   // Who a request goes to: agents in this pane's tab, the most recent first,
   // then terminals there running an agent program that reports no status.
-  targets(all = panes()) {
-    // A pane serves its own tab; a panel serves the tab on screen.
-    const tab = this.inPanel ? focused()?.tab : all.find((p) => p.mod === MOD)?.tab;
+  // The tab Blueprint serves: a pane's own tab; for a panel, the tab on screen
+  // (the active space's active tab, as the tab bar sees it).
+  servedTab(all) {
+    if (!this.inPanel) return all.find((p) => p.mod === MOD)?.tab ?? null;
+    return spaces().find((sp) => sp.active)?.tabs?.find((t) => t.active)?.id ?? focused()?.tab ?? null;
+  }
+
+  targets(all = panes(), tab = this.servedTab(all)) {
     const list = agents().filter((a) => !tab || a.tab === tab).sort((a, b) => b.seq - a.seq)
       .map((a) => ({ address: a.address, name: APPS[a.app] ?? a.program?.name ?? a.app ?? a.address, status: a.status }));
     for (const p of all) {
@@ -653,13 +664,25 @@ export default class Blueprint extends View {
     this.mono = settings().font_family;
     const all = panes();
     this.paneFocused = this.inPanel ? !!this.hovering : !!all.find((p) => p.mod === MOD)?.focused;
-    this.targetList = this.targets(all);
-    // The project follows the tab's terminal folder: the connected agent's,
-    // else an agent's, else any terminal's there. syncProject does the rest.
-    const tabId = this.inPanel ? focused()?.tab : all.find((p) => p.mod === MOD)?.tab;
-    const terms = all.filter((p) => p.terminal && p.tab === tabId);
-    const pick = terms.find((p) => p.terminal === this.project?.meta.agent)
-      ?? terms.find((p) => this.targetList.some((x) => x.address === p.terminal)) ?? terms[0];
+    const tabId = this.servedTab(all);
+    this.targetList = this.targets(all, tabId);
+    // Another tab: what was shown belonged to the old one, so it goes at once
+    // and the new tab's project is looked up afresh.
+    if (tabId !== this.ctxTab) {
+      this.ctxTab = tabId;
+      this.ctxCwd = undefined;
+      this.project = null;
+      this.watchGen = (this.watchGen ?? 0) + 1;
+      this.graphs = [];
+      this.selected = null;
+      this.compose = null;
+      this.waiting = null;
+      this.loading = true;
+    }
+    // The project is the folder of the tab's agent: the connected one, else
+    // the first. No agent there, no project. syncProject does the rest.
+    const terms = all.filter((p) => p.terminal && p.tab === tabId && this.targetList.some((x) => x.address === p.terminal));
+    const pick = terms.find((p) => p.terminal === this.project?.meta.agent) ?? terms[0];
     this.ctxPane = pick?.pane ?? null;
     this.ctxBranch = pick?.branch ?? null;
     if ((pick?.cwd ?? null) !== this.ctxCwd || this.ctxCwd === undefined) {
@@ -808,7 +831,7 @@ export default class Blueprint extends View {
         if (!h) this.drag = null;
       });
     if (!this.size) return el;
-    if (!this.graphs.length) return el.child(this.emptyCard(t));
+    if (!this.graphs.length) return this.loading ? el : el.child(this.emptyCard(t));
     return el.children(this.drawing(t, pal))
       .when(this.editing, (el) => el.child(h_flex().absolute().left(12).top(12).gap(6).px(10).h(26).items_center().rounded(6)
         .bg(alpha(t.accent, 0.16)).border(1).border_color(alpha(t.accent, 0.5)).text_size(12).text_color(t.accent)
@@ -823,7 +846,10 @@ export default class Blueprint extends View {
     const W = this.size.width, cw = Math.min(440, W - 32);
     const body = v_flex().w(cw).gap(10).p(18).rounded(12).bg(t.background).border(1).border_color(t.border)
       .child(div().text_size(14).font_semibold().text_color(t.foreground).child(p ? T.emptyTitle : T.noProject));
-    if (!p) return div().absolute().inset_0().flex().items_center().justify_center().child(body);
+    if (!p) {
+      return div().absolute().inset_0().flex().items_center().justify_center()
+        .child(body.child(div().text_size(12.5).text_color(t.muted).child(T.noAgentHere)));
+    }
     const where = [p.path, this.ctxBranch].filter(Boolean).join(" · ");
     let out = body.child(div().text_size(11).font_family(this.mono).text_color(t.dim).truncate().child(where));
     if (this.waiting) {

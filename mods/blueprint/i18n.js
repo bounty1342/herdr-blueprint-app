@@ -20,7 +20,7 @@ export const KEY_ALIASES = { "ㄷ": "e", "ㄹ": "f", "い": "e", "は": "f" };
 
 const TEXT = {
   en: {
-    noProject: "No terminal in this tab",
+    noProject: "No agent in this tab",
     emptyTitle: "No diagram for this project yet",
     pickAgent: "Connect an agent: it draws what it is building, here",
     noAgentHere: "Run an agent in this tab (Claude Code, Codex, Grok…) to connect it",
@@ -60,7 +60,7 @@ const TEXT = {
     hint: "Click a node to light its flow · E to edit · drag to move · ⌘ scroll to zoom",
   },
   ko: {
-    noProject: "이 탭에 터미널이 없어요",
+    noProject: "이 탭에 에이전트가 없어요",
     emptyTitle: "이 프로젝트엔 아직 다이어그램이 없어요",
     pickAgent: "에이전트를 연결하면 만들고 있는 걸 여기에 그려 줘요",
     noAgentHere: "이 탭에서 에이전트(Claude Code, Codex, Grok…)를 실행하면 연결할 수 있어요",
@@ -100,7 +100,7 @@ const TEXT = {
     hint: "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 · 드래그로 이동 · ⌘ 스크롤로 확대",
   },
   ja: {
-    noProject: "このタブにターミナルがありません",
+    noProject: "このタブにエージェントがいません",
     emptyTitle: "このプロジェクトにはまだ図がありません",
     pickAgent: "エージェントを接続すると、作っているものをここに描きます",
     noAgentHere: "このタブでエージェント（Claude Code、Codex、Grok…）を起動すると接続できます",
