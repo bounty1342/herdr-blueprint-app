@@ -28,7 +28,7 @@
 
 import { View, div, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, spaces, focused, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
+import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
 import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
@@ -128,7 +128,9 @@ const EMPTY = { nodes: new Map(), edges: [], title: null, dir: "LR" };
 
 export default class Blueprint extends View {
   init(props, cx) {
-    this.inPanel = !!props?.panel;
+    // A layout block's props come through props(); init's argument did not
+    // carry them for the panel, which then served the tab of a Blueprint pane.
+    this.inPanel = !!(given()?.panel ?? props?.panel);
     this.tab = 0;
     this.graphs = []; // the project's diagrams: { key (file), rev, tab, src, g, loaded, pinned }
     this.views = {}; // per diagram file: {z, x, y} once moved by hand; none means fit
@@ -695,6 +697,8 @@ export default class Blueprint extends View {
       .id("bp-root")
       .size_full()
       .bg(t.background)
+      // As a side panel it is a card like Files and Changes beside it.
+      .when(this.inPanel, (el) => el.min_h(0).rounded(10).overflow_hidden().border_1().border_color(t.border))
       .text_size(13)
       .track_focus(this.focus)
       .on_size_change((s, cx) => {
