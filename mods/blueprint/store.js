@@ -45,6 +45,14 @@ export function projectDir(path) {
   return `${projectsDir()}/${name}-${hash(path)}`;
 }
 
+export async function hasDir(dir) {
+  try {
+    return await fs.exists(dir);
+  } catch (_) {
+    return false;
+  }
+}
+
 export async function readMeta(dir, path) {
   let saved = null;
   try {

@@ -31,7 +31,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
-import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
+import { checkoutOf, projectDir, hasDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS } from "./store.js";
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
@@ -149,6 +149,13 @@ export default class Blueprint extends View {
     // A layout block's props come through props(); init's argument did not
     // carry them for the panel, which then served the tab of a Blueprint pane.
     this.inPanel = !!(given()?.panel ?? props?.panel);
+    // A pane's own tab. panes() doesn't say which Blueprint pane is this one,
+    // and with two of them "the first" was the other's. So: the tab given when
+    // it was opened from the panel, else the tab on screen when this pane is
+    // laid out (a pane is only laid out while its tab shows; init is no good,
+    // since a reload re-inits hidden copies too), and a click in the pane
+    // checks it again (see ownPane). Until then it serves nothing.
+    if (!this.inPanel) this.ownTab = given()?.tab ?? null;
     this.tab = 0;
     this.graphs = []; // the project's diagrams: { key (file), rev, tab, src, g, loaded, pinned }
     this.views = {}; // per diagram file: {z, x, y} once moved by hand; none means fit
@@ -254,20 +261,34 @@ export default class Blueprint extends View {
       this.loading = false;
       return this.redraw(cx);
     }
+    // Only a project Blueprint has been used for has a folder: following tabs
+    // (a hidden panel follows them too) must not leave one behind for every
+    // tab it passes. Connecting or asking for a diagram makes it.
     const dir = projectDir(path);
+    const known = await hasDir(dir);
     const meta = await readMeta(dir, path);
-    meta.opened = Date.now();
-    await writeMeta(dir, meta);
+    if (known) {
+      meta.opened = Date.now();
+      await writeMeta(dir, meta);
+    }
     this.project = { path, dir, meta, name: path.split("/").filter(Boolean).pop() ?? path };
     await this.reload(cx);
     this.loading = false;
     this.redraw(cx);
-    const gen = this.watchGen;
+    if (known) this.watch(cx);
+  }
+
+  // Redraw when the project's folder changes (the agent saved a diagram). One
+  // watch per project at a time; a newer project stops it.
+  watch(cx) {
+    const p = this.project, gen = this.watchGen;
+    if (!p || this.watching === `${gen}:${p.dir}`) return;
+    this.watching = `${gen}:${p.dir}`;
     cx.spawn(async (cx) => {
       for (;;) {
         let changed;
         try {
-          changed = await watchFolder(dir);
+          changed = await watchFolder(p.dir);
         } catch (_) {
           return;
         }
@@ -357,6 +378,7 @@ export default class Blueprint extends View {
     cx.spawn(async (cx) => {
       try {
         await writeMeta(p.dir, p.meta);
+        this.watch(cx);
         const r = await hc(["send", target.address, drawPrompt(p.dir, this.lang)]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
         notify({ title: this.T.asked(target.name), body: p.path, level: "success", timeout: 4000 });
@@ -389,7 +411,7 @@ export default class Blueprint extends View {
     const tab = this.servedTab(panes());
     const there = panes().find((p) => p.mod === MOD && p.tab === tab);
     if (there) run("pane.focus", { pane: there.pane });
-    else run("pane.split", { direction: "right", pane: this.ctxPane ?? focused()?.pane ?? undefined, mod: MOD });
+    else run("pane.split", { direction: "right", pane: this.ctxPane ?? focused()?.pane ?? undefined, mod: MOD, props: { tab } });
     if (this.inPanel) run("layout.hide", { id: "panel" });
   }
 
@@ -528,8 +550,32 @@ export default class Blueprint extends View {
   // The tab Blueprint serves: a pane's own tab; for a panel, the tab on screen
   // (the active space's active tab, as the tab bar sees it).
   servedTab(all) {
-    if (!this.inPanel) return all.find((p) => p.mod === MOD)?.tab ?? null;
+    if (!this.inPanel) return this.ownTab ?? null;
+    return this.shownTab();
+  }
+
+  shownTab() {
     return spaces().find((sp) => sp.active)?.tabs?.find((t) => t.active)?.id ?? focused()?.tab ?? null;
+  }
+
+  // Laid out: a pane only is while its tab shows, so the tab on screen is ours.
+  laidOut() {
+    if (this.inPanel || given()?.tab) return;
+    const shown = this.shownTab();
+    if (panes().some((p) => p.mod === MOD && p.tab === shown)) this.ownTab = shown;
+  }
+
+  // Clicked: this pane has the focus now, so the focused Blueprint pane is
+  // this one, and its tab is ours.
+  ownPane(cx) {
+    if (this.inPanel) return;
+    cx.timer.after(120, (cx) => {
+      const me = panes().find((p) => p.mod === MOD && p.focused);
+      if (me && me.tab !== this.ownTab) {
+        this.ownTab = me.tab;
+        this.redraw(cx);
+      }
+    });
   }
 
   targets(all = panes(), tab = this.servedTab(all)) {
@@ -635,6 +681,11 @@ export default class Blueprint extends View {
     this.redraw(cx);
     cx.spawn(async (cx) => {
       try {
+        if (fresh) {
+          // The agent is told the folder exists.
+          await writeMeta(this.project.dir, this.project.meta);
+          this.watch(cx);
+        }
         const r = await hc(["send", target.address, text]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
         notify({ title: this.T.sent(target.name), body: fresh ? note : `${n.title}: ${note}`, level: "success", timeout: 4000 });
@@ -732,7 +783,7 @@ export default class Blueprint extends View {
     const t = theme(), pal = palette(t);
     this.mono = settings().font_family;
     const all = panes();
-    this.paneFocused = this.inPanel ? !!this.hovering : !!all.find((p) => p.mod === MOD)?.focused;
+    this.paneFocused = this.inPanel ? !!this.hovering : !!all.find((p) => p.mod === MOD && p.tab === this.ownTab && p.focused);
     const tabId = this.servedTab(all);
     this.targetList = this.targets(all, tabId);
     // Another tab: what was shown belonged to the old one, so it goes at once
@@ -771,6 +822,7 @@ export default class Blueprint extends View {
         // Only on a real change: a notify here re-renders, which reports again.
         if (Math.abs(s.width - this.width) < 0.5) return;
         this.width = s.width;
+        this.laidOut();
         this.redraw(cx);
       })
       .on_mouse_move((e) => (this.bounds = e.bounds ?? this.bounds))
@@ -778,7 +830,10 @@ export default class Blueprint extends View {
         this.hovering = on;
         this.redraw(cx);
       }))
-      .on_mouse_down("left", () => this.focus.focus())
+      .on_mouse_down("left", (_e, cx) => {
+        this.focus.focus();
+        this.ownPane(cx);
+      })
       .on_key_down((e, cx) => {
         // Shortcuts work with a Korean or Japanese input source on, too.
         const k = KEY_ALIASES[e.key_char] ?? KEY_ALIASES[e.key] ?? e.keystroke;
