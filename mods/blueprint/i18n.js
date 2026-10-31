@@ -20,6 +20,9 @@ export const KEY_ALIASES = { "ㄷ": "e", "ㄹ": "f", "い": "e", "は": "f" };
 
 const TEXT = {
   en: {
+    pinTip: "Pin: keep it past 7 days",
+    unpinTip: "Unpin",
+    editTip: "Edit: point at a box and ask (E)",
     noProject: "No agent in this tab",
     emptyTitle: "No diagram for this project yet",
     pickAgent: "Connect an agent: it draws what it is building, here",
@@ -60,6 +63,9 @@ const TEXT = {
     hint: "Click a node to light its flow · E to edit · drag to move · ⌘ scroll to zoom",
   },
   ko: {
+    pinTip: "고정: 7일이 지나도 보관",
+    unpinTip: "고정 해제",
+    editTip: "수정: 박스를 가리켜 요청 (E)",
     noProject: "이 탭에 에이전트가 없어요",
     emptyTitle: "이 프로젝트엔 아직 다이어그램이 없어요",
     pickAgent: "에이전트를 연결하면 만들고 있는 걸 여기에 그려 줘요",
@@ -100,6 +106,9 @@ const TEXT = {
     hint: "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 · 드래그로 이동 · ⌘ 스크롤로 확대",
   },
   ja: {
+    pinTip: "固定: 7日を過ぎても保存",
+    unpinTip: "固定を解除",
+    editTip: "編集: ボックスを指して依頼 (E)",
     noProject: "このタブにエージェントがいません",
     emptyTitle: "このプロジェクトにはまだ図がありません",
     pickAgent: "エージェントを接続すると、作っているものをここに描きます",

@@ -26,7 +26,7 @@
 //   edit, compose-<node id>, note-<text, _ for spaces>, send, cancel, target-<terminal>,
 //   connect-<terminal>, pin, pane
 
-import { View, div, PathBuilder } from "gpui-kit";
+import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
@@ -35,7 +35,7 @@ import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS 
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
-const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
+const HEADER_H = 44, TABS_H = 38, META_H = 30, FOOTER_H = 40; // META_H: the second row without tabs
 const TITLE = 12.5, SUB = 10.5, LABEL = 11; // text px at 100%
 const ZMIN = 0.2, ZMAX = 3, ZFIT_MAX = 1.4;
 // The dot: built from still spots along its route, each showing "●" on its
@@ -657,7 +657,7 @@ export default class Blueprint extends View {
         await shot(tmp);
         const pw = Number((await exec("sips", ["-g", "pixelWidth", tmp])).stdout.match(/pixelWidth:\s*(\d+)/)?.[1]);
         const s = pw / window.viewport_size().width;
-        const b = this.bounds, top = b.y + HEADER_H + TABS_H;
+        const b = this.bounds, top = b.y + HEADER_H + (this.rowH ?? TABS_H);
         const crop = [this.size.height, this.size.width, top, b.x].map((v) => String(Math.round(v * s)));
         const r = await exec("sips", ["-c", crop[0], crop[1], "--cropOffset", crop[2], crop[3], tmp, "--out", out]);
         await exec("rm", ["-f", tmp]);
@@ -757,49 +757,44 @@ export default class Blueprint extends View {
       .children(this.measuring());
   }
 
+  // Title, the agent, and three quiet icon buttons (pin, open as pane, edit)
+  // drawn in the text colour, with a tooltip each.
   header(t, pal, G, narrow) {
-    const small = (id, label, on, onClick) => div().id(id).flex_none().h(26).px(10).flex().items_center().rounded(6).border(1)
-      .text_size(12).cursor_pointer().border_color(on ? alpha(t.accent, 0.6) : t.border).text_color(on ? t.accent : t.foreground)
+    const T = this.T;
+    const icon = (id, file, tip, on, onClick) => div().id(id).flex_none().size(28).flex().items_center().justify_center()
+      .rounded(6).cursor_pointer().tooltip(tip).text_color(on ? t.accent : t.muted)
       .when(on, (el) => el.bg(alpha(t.accent, 0.16)))
-      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .on_click((_e, cx) => {
         onClick(cx);
         this.redraw(cx);
       })
-      .child(label);
+      .child(svg(`mods/blueprint/${file}`).size(15));
     const a = this.pickTarget(this.targetList);
     const c = a ? { working: pal.active, blocked: t.blocked, done: pal.done }[a.status] ?? t.muted : t.dim;
-    const T = this.T, said = a?.status ? T.status[a.status] : null;
+    const said = a?.status ? T.status[a.status] : null;
     const label = !a ? T.noAgent : narrow ? said ?? a.name : said ? `${a.name} · ${said}` : a.name;
     const pill = h_flex().flex_none().gap(6).px(10).h(24).rounded_full().items_center().bg(alpha(c, 0.14))
       .child(div().w(7).h(7).rounded_full().bg(c))
       .child(div().text_size(12).text_color(c).child(label));
-    return h_flex().h(HEADER_H).flex_none().px(16).gap(10).items_center().border_b(1).border_color(t.border)
-      .when(!narrow, (el) => el.child(div().flex_none().text_color(t.muted).child("Blueprint")))
+    return h_flex().h(HEADER_H).flex_none().pl(16).pr(10).gap(8).items_center().border_b(1).border_color(t.border)
       .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground)
         .child(G ? G.g.title ?? G.tab : this.project?.name ?? T.noProject))
-      .child(pill)
-      .when(!!G && !narrow, (el) => el.child(div().flex_none().text_size(12).text_color(t.muted).child(T.ago(minutesSince(G.loaded)))))
-      .when(!!G, (el) => el.child(small("bp-pin", G.pinned ? T.pinned : T.pin, G.pinned, (cx) => this.togglePin(cx))))
-      .when(this.inPanel && !narrow, (el) => el.child(small("bp-pane", T.openPane, false, () => this.openPane())))
-      .when(!!G, (el) => el.child(div().id("bp-edit").flex_none().h(26).px(10).flex().items_center().rounded(6).border(1).text_size(12)
-        .cursor_pointer().border_color(this.editing ? alpha(t.accent, 0.6) : t.border)
-        .text_color(this.editing ? t.accent : t.foreground)
-        .when(this.editing, (el) => el.bg(alpha(t.accent, 0.16)))
-        .when(!this.editing, (el) => el.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => {
-          this.setEditing(!this.editing);
-          this.redraw(cx);
-        })
-        .child(this.editing ? T.editing : T.edit)));
+      .child(div().mr(4).child(pill))
+      .when(!!G, (el) => el.child(icon("bp-pin", G.pinned ? "pin-on.svg" : "pin.svg", G.pinned ? T.unpinTip : T.pinTip, G.pinned, (cx) => this.togglePin(cx))))
+      .when(this.inPanel, (el) => el.child(icon("bp-pane", "pane.svg", T.openPane, false, () => this.openPane())))
+      .when(!!G, (el) => el.child(icon("bp-edit", "edit.svg", T.editTip, this.editing, () => this.setEditing(!this.editing))));
   }
 
+  // Where and when: project (and branch) and the diagram's age; the diagram
+  // tabs only when there are two or more (one would repeat the title).
   tabs(t) {
-    const p = this.project;
-    const where = p ? [p.name, this.ctxBranch].filter(Boolean).join(" · ") : null;
-    return h_flex().h(TABS_H).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
-      .when(!!where, (el) => el.child(div().flex_none().max_w(180).truncate().px(8).text_size(11.5).font_family(this.mono).text_color(t.dim).child(where)))
-      .children(this.graphs.map((d, i) => {
+    const p = this.project, G = this.graphs[this.tab];
+    const where = p ? [p.name, this.ctxBranch, G ? this.T.ago(minutesSince(G.loaded)) : null].filter(Boolean).join(" · ") : null;
+    this.rowH = this.graphs.length > 1 ? TABS_H : META_H;
+    return h_flex().h(this.rowH).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
+      .when(!!where, (el) => el.child(div().flex_none().max_w(260).truncate().px(6).mr(4).text_size(11.5).text_color(t.dim).child(where)))
+      .children((this.graphs.length > 1 ? this.graphs : []).map((d, i) => {
         const on = i === this.tab;
         return div().id(`bp-tab-${i}`).px(10).py(4).rounded(6).text_size(12).cursor_pointer()
           .text_color(on ? t.foreground : t.muted)
@@ -810,7 +805,7 @@ export default class Blueprint extends View {
             this.redraw(cx);
           })
           .max_w(200).truncate()
-          .child(d.pinned ? `● ${d.tab}` : d.tab);
+          .child(d.tab);
       }));
   }
 
