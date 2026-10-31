@@ -9,13 +9,28 @@
     "parts": [
       {
         "frames": "/Users/Shared/blueprint-demo-rec/hero",
-        "to": 1793454350800,
+        "to": 1793454340700,
         "crop": [
+          0,
+          0,
+          2560,
+          1600
+        ],
+        "seconds": 1.8
+      },
+      {
+        "zoom": [
           1180,
           560,
           1380,
           862
-        ]
+        ],
+        "seconds": 1.0
+      },
+      {
+        "frames": "/Users/Shared/blueprint-demo-rec/hero",
+        "from": 1793454340700,
+        "to": 1793454350800
       },
       {
         "zoom": [
