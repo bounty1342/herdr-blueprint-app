@@ -3,7 +3,8 @@
 //
 //   <app home>/data/blueprint/projects/<name>-<hash>/
 //     <diagram>.mmd   one Mermaid diagram each: the agent writes, Blueprint reads
-//     project.json    { path, agent, pinned: [file], seen: { file: ms }, opened: ms }
+//     project.json    { path, agent, asked, pinned: [file], seen: { file: ms }, opened: ms }
+//     topic.txt       the project's main topic, one line, written by the agent
 //
 // A project is a checkout: the git top level of the tab's terminal folder, so
 // every worktree is its own project (its folder stays put while branches come
@@ -103,6 +104,7 @@ export async function pruneAll(now = Date.now()) {
     const kept = await load(dir, meta, now);
     if (kept.length || now - meta.opened <= KEEP_DAYS * DAY) continue;
     await fs.unlink(`${dir}/project.json`).catch(() => {});
+    await fs.unlink(`${dir}/topic.txt`).catch(() => {});
     await fs.rmdir(dir).catch(() => {});
   }
 }

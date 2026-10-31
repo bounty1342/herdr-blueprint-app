@@ -35,7 +35,7 @@ import { checkoutOf, projectDir, readMeta, writeMeta, load, pruneAll, KEEP_DAYS 
 import { text, pickLang, KEY_ALIASES } from "./i18n.js";
 
 const MOD = "blueprint";
-const HEADER_H = 44, TABS_H = 38, META_H = 30, FOOTER_H = 40; // META_H: the second row without tabs
+const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
 const TITLE = 12.5, SUB = 10.5, LABEL = 11; // text px at 100%
 const ZMIN = 0.2, ZMAX = 3, ZFIT_MAX = 1.4;
 // The dot: built from still spots along its route, each showing "●" on its
@@ -126,6 +126,7 @@ function diagramRules(lang) {
 
 function drawPrompt(dir, lang) {
   return clean(`Blueprint (the Herdr app panel) is now connected to you for this project. Draw the code you are working on as a Mermaid flowchart and save it as a .mmd file in \`${dir}/\` (the folder exists; one file per diagram, a short kebab-case name such as \`auth-flow.mmd\`). Blueprint shows it as soon as it is saved.
+- Also write the project's main topic, one short line in ${LANG_NAMES[lang] ?? "English"}, to \`${dir}/topic.txt\`: Blueprint's header shows it above the diagrams, whose titles name the part each one covers.
 ${diagramRules(lang)}
 `);
 }
@@ -282,7 +283,10 @@ export default class Blueprint extends View {
     const p = this.project;
     if (!p) return;
     const items = await load(p.dir, p.meta);
+    // The project's big topic, if the agent wrote one (first line of topic.txt).
+    const topic = (await readTextFile(`${p.dir}/topic.txt`))?.split("\n")[0].trim();
     if (p !== this.project) return;
+    p.topic = topic || null;
     this.setDiagrams(items);
     this.markSeen(cx);
     this.redraw(cx);
@@ -821,34 +825,36 @@ export default class Blueprint extends View {
       .child(div().w(7).h(7).rounded_full().bg(c))
       .child(div().text_size(12).text_color(c).child(label));
     return h_flex().h(HEADER_H).flex_none().pl(16).pr(10).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground)
-        .child(G ? G.g.title ?? G.tab : this.project?.name ?? T.noProject))
+      .child(h_flex().flex_1().min_w(0).gap(8).items_center()
+        // While the tab's project is being looked up there is nothing to name yet.
+        .child(div().min_w(0).truncate().font_semibold().text_color(t.foreground)
+          .child(this.project ? this.project.topic ?? this.project.name : this.loading ? "" : T.noProject))
+        .when(!!this.project && !!this.ctxBranch && !narrow, (el) => el.child(div().flex_none().text_size(11.5).font_family(this.mono).text_color(t.dim).child(this.ctxBranch))))
       .child(div().mr(4).child(pill))
       .when(!!G, (el) => el.child(icon("bp-pin", G.pinned ? "pin-on.svg" : "pin.svg", G.pinned ? T.unpinTip : T.pinTip, G.pinned, (cx) => this.togglePin(cx))))
       .when(this.inPanel, (el) => el.child(icon("bp-pane", "pane.svg", T.openPane, false, () => this.openPane())))
       .when(!!G, (el) => el.child(icon("bp-edit", "edit.svg", T.editTip, this.editing, () => this.setEditing(!this.editing))));
   }
 
-  // Where and when: project (and branch) and the diagram's age; the diagram
-  // tabs only when there are two or more (one would repeat the title).
+  // The parts of the project: one tab per diagram (always, even one), + to
+  // ask for another right after them, and the shown diagram's age at the far
+  // end. The project itself is the header's title.
   tabs(t) {
     const p = this.project, G = this.graphs[this.tab];
-    const where = p ? [p.name, this.ctxBranch, G ? this.T.ago(minutesSince(G.loaded)) : null].filter(Boolean).join(" · ") : null;
-    this.rowH = this.graphs.length > 1 ? TABS_H : META_H;
-    return h_flex().h(this.rowH).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
-      .when(!!where, (el) => el.child(div().flex_none().max_w(260).truncate().px(6).mr(4).text_size(11.5).text_color(t.dim).child(where)))
-      .children((this.graphs.length > 1 ? this.graphs : []).map((d, i) => {
+    this.rowH = TABS_H;
+    return h_flex().h(TABS_H).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
+      .children(this.graphs.map((d, i) => {
         const on = i === this.tab;
-        return div().id(`bp-tab-${i}`).px(10).py(4).rounded(6).text_size(12).cursor_pointer()
-          .text_color(on ? t.foreground : t.muted)
+        return h_flex().id(`bp-tab-${i}`).flex_none().max_w(220).gap(5).px(10).py(4).items_center().rounded(6).text_size(12)
+          .cursor_pointer().text_color(on ? t.foreground : t.muted)
           .when(on, (el) => el.bg(t.raised))
           .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
           .on_click((_e, cx) => {
             this.setTab(i, cx);
             this.redraw(cx);
           })
-          .max_w(200).truncate()
-          .child(d.tab);
+          .when(d.pinned, (el) => el.child(svg("mods/blueprint/pin-on.svg").size(11).flex_none()))
+          .child(div().min_w(0).truncate().child(d.tab));
       }))
       .when(!!this.expectNew, (el) => el.child(div().flex_none().px(10).py(4).rounded(6).text_size(12).text_color(t.dim)
         .border(1).border_color(t.border).child(this.T.drawingNew)))
@@ -859,7 +865,9 @@ export default class Blueprint extends View {
           this.openCreate();
           this.redraw(cx);
         })
-        .child(svg("mods/blueprint/plus.svg").size(14))));
+        .child(svg("mods/blueprint/plus.svg").size(14))))
+      .child(div().flex_1())
+      .when(!!G, (el) => el.child(div().flex_none().pl(8).pr(4).text_size(11.5).text_color(t.dim).child(this.T.ago(minutesSince(G.loaded)))));
   }
 
   canvas(t, pal, cx) {
