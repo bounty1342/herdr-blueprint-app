@@ -125,6 +125,7 @@ function drawPrompt(dir, lang) {
 }
 
 const EMPTY = { nodes: new Map(), edges: [], title: null, dir: "LR" };
+const ASK_WAIT = 10 * 60000; // how long an unanswered draw request holds the list back
 
 export default class Blueprint extends View {
   init(props, cx) {
@@ -230,7 +231,6 @@ export default class Blueprint extends View {
       return this.redraw(cx);
     }
     this.watchGen = (this.watchGen ?? 0) + 1; // stops the old folder's watch
-    this.waiting = null;
     if (!path) {
       this.project = null;
       this.setDiagrams([]);
@@ -268,7 +268,6 @@ export default class Blueprint extends View {
     const items = await load(p.dir, p.meta);
     if (p !== this.project) return;
     this.setDiagrams(items);
-    if (this.graphs.length) this.waiting = null;
     this.markSeen(cx);
     this.redraw(cx);
   }
@@ -325,8 +324,8 @@ export default class Blueprint extends View {
     const p = this.project;
     if (!p || !target) return;
     p.meta.agent = target.address;
+    p.meta.asked = Date.now();
     this.target = null;
-    this.waiting = { name: target.name };
     cx.spawn(async (cx) => {
       try {
         await writeMeta(p.dir, p.meta);
@@ -334,11 +333,24 @@ export default class Blueprint extends View {
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
         notify({ title: this.T.asked(target.name), body: p.path, level: "success", timeout: 4000 });
       } catch (err) {
-        this.waiting = null;
+        p.meta.asked = 0;
         notify({ title: this.T.sendFailed, body: String(err?.message ?? err), level: "error" });
       }
       this.redraw(cx);
     });
+  }
+
+  // Asked and not answered yet: kept in project.json, so leaving the tab or
+  // reloading doesn't bring the agent list back while the agent is drawing
+  // (a second pick would send the request twice). It counts while the
+  // connected agent is working, or for ASK_WAIT after asking; then the list
+  // offers to ask again.
+  pending(list) {
+    const p = this.project;
+    const agent = list.find((x) => x.address === p?.meta.agent);
+    if (!agent || !p.meta.asked) return null;
+    const recent = Date.now() - p.meta.asked < ASK_WAIT;
+    return agent.status === "working" || recent ? agent : null;
   }
 
   openPane() {
@@ -678,7 +690,6 @@ export default class Blueprint extends View {
       this.graphs = [];
       this.selected = null;
       this.compose = null;
-      this.waiting = null;
       this.loading = true;
     }
     // The project is the folder of the tab's agent: the connected one, else
@@ -856,8 +867,9 @@ export default class Blueprint extends View {
     }
     const where = [p.path, this.ctxBranch].filter(Boolean).join(" · ");
     let out = body.child(div().text_size(11).font_family(this.mono).text_color(t.dim).truncate().child(where));
-    if (this.waiting) {
-      out = out.child(div().pt(4).text_size(12.5).text_color(t.accent).child(T.asked(this.waiting.name)))
+    const asked = this.pending(list);
+    if (asked) {
+      out = out.child(div().pt(4).text_size(12.5).text_color(t.accent).child(T.asked(asked.name)))
         .child(div().text_size(12).text_color(t.muted).child(T.waitingBody));
     } else if (list.length) {
       out = out.child(div().pt(4).text_size(12.5).text_color(t.muted).child(T.pickAgent))
