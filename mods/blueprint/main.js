@@ -24,7 +24,7 @@
 // Commands (keys.json or `herdr-app do blueprint.<name>`):
 //   fit, zoom-in, zoom-out, zoom-100, export, clear, tab-1..9, select-<node id>,
 //   edit, compose-<node id>, note-<text, _ for spaces>, send, cancel, target-<terminal>,
-//   connect-<terminal>, pin, pane
+//   connect-<terminal>, pin, pane, new
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -115,12 +115,28 @@ const LANG_NAMES = { en: "English", ko: "Korean", ja: "Japanese" };
 
 // What a newly connected agent is asked: draw the code it is building into a
 // file of this project's folder, keep it current, mark the work in progress.
-function drawPrompt(dir, lang) {
-  return clean(`Blueprint (the Herdr app panel) is now connected to you for this project. Draw the code you are working on as a Mermaid flowchart and save it as a .mmd file in \`${dir}/\` (the folder exists; one file per diagram, a short kebab-case name such as \`auth-flow.mmd\`). Blueprint shows it as soon as it is saved.
-- Start the file with YAML frontmatter: \`title: ...\`. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class or route).
+// How a Blueprint diagram is written, for every request that asks for one.
+function diagramRules(lang) {
+  return `- Start the file with YAML frontmatter: \`title: ...\`. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class, route or columns).
+- Blueprint draws Mermaid flowcharts only. For a database, draw one cylinder box per table (\`users[("users<br/>id · email")]\`) and label the edges with the relation (\`-->|1:N|\`).
 - Every box is a piece of the code, not a step of your task. Tie each box to it: \`%% code: <node id> <path>:<line>\`.
 - Mark progress: \`class <ids> done\` for finished parts, \`class <ids> active\` for work in progress, \`class <id> current\` for what you are on right now.
-- After each unit of work, update that file in place (change only what changed). Skip it when the flow did not change. Diagrams nobody uses for ${KEEP_DAYS} days are deleted.
+- After each unit of work, update that file in place (change only what changed). Skip it when the flow did not change. Diagrams nobody uses for ${KEEP_DAYS} days are deleted.`;
+}
+
+function drawPrompt(dir, lang) {
+  return clean(`Blueprint (the Herdr app panel) is now connected to you for this project. Draw the code you are working on as a Mermaid flowchart and save it as a .mmd file in \`${dir}/\` (the folder exists; one file per diagram, a short kebab-case name such as \`auth-flow.mmd\`). Blueprint shows it as soon as it is saved.
+${diagramRules(lang)}
+`);
+}
+
+// The + in the tab row: another diagram of this project, about what the
+// person asked, as a new file next to the others.
+function newPrompt(dir, request, lang, files) {
+  const taken = files.length ? ` Don't overwrite ${files.map((f) => `\`${f}\``).join(", ")}.` : "";
+  return clean(`In Blueprint I asked for a new diagram of this project: ${request}
+Look at the code it is about, draw it as a Mermaid flowchart and save it as a new .mmd file in \`${dir}/\` (a short kebab-case name).${taken} Blueprint opens it as a new tab as soon as it is saved.
+${diagramRules(lang)}
 `);
 }
 
@@ -288,6 +304,14 @@ export default class Blueprint extends View {
     const newest = items[0]?.file;
     const i = this.graphs.findIndex((d) => d.key === shown);
     this.tab = i >= 0 ? i : Math.max(0, this.graphs.findIndex((d) => d.key === newest));
+    // The diagram asked for with + has arrived: show it.
+    const ask = this.expectNew;
+    if (ask && Date.now() - ask.since > ASK_WAIT) this.expectNew = null;
+    const arrived = ask && this.graphs.findIndex((d) => !ask.known.has(d.key));
+    if (ask && arrived >= 0) {
+      this.tab = arrived;
+      this.expectNew = null;
+    }
     if (this.selected && !this.graph.nodes.has(this.selected)) this.selected = null;
     if (this.compose && !this.graph.nodes.has(this.compose.id)) this.compose = null;
   }
@@ -542,6 +566,7 @@ export default class Blueprint extends View {
     else if (c.startsWith("target-")) this.target = c.slice(7) || null;
     else if (c.startsWith("connect-")) this.connect(this.targets().find((x) => x.address === c.slice(8)) ?? { address: c.slice(8), name: c.slice(8) }, cx);
     else if (c === "pin") this.togglePin(cx);
+    else if (c === "new") this.openCreate();
     else if (c === "pane") this.openPane();
     else if (c === "reload") cx.spawn(async (cx) => this.reload(cx));
     else if (c === "lang-auto") this.langForced = false;
@@ -568,6 +593,19 @@ export default class Blueprint extends View {
     this.input.focus();
   }
 
+  // The + in the tab row: ask the agent for another diagram.
+  openCreate() {
+    if (!this.project) return;
+    this.editing = false;
+    this.selected = null;
+    if (this.compose?.kind !== "new") {
+      this.input.set_value("");
+      this.noteEmpty = true;
+    }
+    this.compose = { kind: "new" };
+    this.input.focus();
+  }
+
   closeCompose() {
     this.compose = null;
     this.focus.focus();
@@ -578,21 +616,26 @@ export default class Blueprint extends View {
   send(cx) {
     if (this.sending || !this.compose) return;
     const note = this.input.value().trim();
-    const n = this.graph.nodes.get(this.compose.id);
-    if (!note || !n) return;
+    const fresh = this.compose.kind === "new";
+    const n = fresh ? null : this.graph.nodes.get(this.compose.id);
+    if (!note || (!fresh && !n) || !this.project) return;
     const target = this.pickTarget(this.targets());
     if (!target) {
       notify({ title: this.T.noTarget, body: this.T.noAgentBody, level: "warning", timeout: 4000 });
       return;
     }
-    const text = pointPrompt(this.graphs[this.tab], n, note, `${this.project?.dir}/${this.vkey}`);
+    const text = fresh
+      ? newPrompt(this.project.dir, note, this.lang, this.graphs.map((d) => d.key))
+      : pointPrompt(this.graphs[this.tab], n, note, `${this.project.dir}/${this.vkey}`);
     this.sending = true;
     this.redraw(cx);
     cx.spawn(async (cx) => {
       try {
         const r = await hc(["send", target.address, text]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send ${r.code}`).trim());
-        notify({ title: this.T.sent(target.name), body: `${n.title}: ${note}`, level: "success", timeout: 4000 });
+        notify({ title: this.T.sent(target.name), body: fresh ? note : `${n.title}: ${note}`, level: "success", timeout: 4000 });
+        // A new diagram: wait for a file that isn't there yet, then show it.
+        if (fresh) this.expectNew = { known: new Set(this.graphs.map((d) => d.key)), since: Date.now(), label: note };
         this.input.set_value("");
         this.noteEmpty = true;
         this.compose = null;
@@ -806,7 +849,17 @@ export default class Blueprint extends View {
           })
           .max_w(200).truncate()
           .child(d.tab);
-      }));
+      }))
+      .when(!!this.expectNew, (el) => el.child(div().flex_none().px(10).py(4).rounded(6).text_size(12).text_color(t.dim)
+        .border(1).border_color(t.border).child(this.T.drawingNew)))
+      .when(!!p, (el) => el.child(div().id("bp-new").flex_none().size(26).ml(2).flex().items_center().justify_center().rounded(6)
+        .cursor_pointer().tooltip(this.T.newTip).text_color(this.compose?.kind === "new" ? t.accent : t.muted)
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => {
+          this.openCreate();
+          this.redraw(cx);
+        })
+        .child(svg("mods/blueprint/plus.svg").size(14))));
   }
 
   canvas(t, pal, cx) {
@@ -849,7 +902,10 @@ export default class Blueprint extends View {
         if (!h) this.drag = null;
       });
     if (!this.size) return el;
-    if (!this.graphs.length) return this.loading ? el : el.child(this.emptyCard(t));
+    if (!this.graphs.length) {
+      if (this.loading) return el;
+      return el.child(this.emptyCard(t)).when(this.compose?.kind === "new", (el) => el.child(this.composer(t)));
+    }
     return el.children(this.drawing(t, pal))
       .when(this.editing, (el) => el.child(h_flex().absolute().left(12).top(12).gap(6).px(10).h(26).items_center().rounded(6)
         .bg(alpha(t.accent, 0.16)).border(1).border_color(alpha(t.accent, 0.5)).text_size(12).text_color(t.accent)
@@ -893,8 +949,9 @@ export default class Blueprint extends View {
 
   // The request box: which node, who gets it, what to change.
   composer(t) {
-    const n = this.graph.nodes.get(this.compose.id);
-    if (!n) return div();
+    const fresh = this.compose.kind === "new";
+    const n = fresh ? null : this.graph.nodes.get(this.compose.id);
+    if (!fresh && !n) return div();
     const list = this.targetList ?? [], target = this.pickTarget(list);
     const W = this.size.width, cw = Math.min(560, W - 24);
     const button = (id, label, primary, enabled, onClick) =>
@@ -918,8 +975,8 @@ export default class Blueprint extends View {
       .bg(t.popover).border(1).border_color(alpha(t.accent, 0.6)).shadow_lg().cursor_default()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(h_flex().gap(8).items_center()
-        .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(n.title))
-        .when(!!n.ref, (el) => el.child(div().min_w(0).truncate().text_size(11).font_family(this.mono).text_color(t.muted).child(n.ref)))
+        .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(fresh ? this.T.newDiagram : n.title))
+        .when(!!n?.ref, (el) => el.child(div().min_w(0).truncate().text_size(11).font_family(this.mono).text_color(t.muted).child(n.ref)))
         .child(div().flex_1())
         .child(div().id("bp-target").flex_none().px(8).h(22).flex().items_center().rounded(6).text_size(11.5)
           .bg(alpha(target ? t.accent : t.blocked, 0.12)).text_color(target ? t.accent : t.blocked)
@@ -929,10 +986,21 @@ export default class Blueprint extends View {
         .child(Input.new(this.input).h(34).px(10).rounded(8).border(1).border_color(this.typing ? t.accent : t.input)
           .bg(t.background).text_size(13).text_color(t.foreground))
         .when(this.noteEmpty, (el) => el.child(div().absolute().left(11).top(0).h(34).flex().items_center()
-          .text_size(13).text_color(t.dim).child(this.T.placeholder))))
+          .text_size(13).text_color(t.dim).child(fresh ? this.T.newPlaceholder : this.T.placeholder))))
+      // Starting points for a new diagram; a click fills the box.
+      .when(fresh, (el) => el.child(h_flex().gap(6).flex_wrap().children(this.T.suggest.map((x, i) =>
+        div().id(`bp-suggest-${i}`).px(8).h(24).flex().items_center().rounded(6).border(1).border_color(t.input)
+          .text_size(11.5).text_color(t.muted).cursor_pointer().hover((s) => s.border_color(t.accent).text_color(t.foreground))
+          .on_click((_e, cx) => {
+            this.input.set_value(x);
+            this.noteEmpty = false;
+            this.input.focus();
+            this.redraw(cx);
+          })
+          .child(x)))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
-          .child(target ? this.T.sendsWith : this.T.openAgent))
+          .child(!target ? this.T.openAgent : fresh ? this.T.newHint : this.T.sendsWith))
         .child(button("bp-cancel", this.T.cancel, false, true, () => this.closeCompose()))
         .child(button("bp-send", this.sending ? this.T.sending : this.T.send, true, ready, (cx) => this.send(cx))));
   }

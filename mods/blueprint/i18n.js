@@ -20,6 +20,12 @@ export const KEY_ALIASES = { "ㄷ": "e", "ㄹ": "f", "い": "e", "は": "f" };
 
 const TEXT = {
   en: {
+    newTip: "Ask the agent for another diagram",
+    newDiagram: "New diagram",
+    newPlaceholder: "What should it draw? e.g. the DB structure",
+    newHint: "Drawn into a new file; it opens as a tab",
+    drawingNew: "Drawing…",
+    suggest: ["The DB structure", "The API request flow", "The whole project's structure", "This feature in detail: "],
     pinTip: "Pin: keep it past 7 days",
     unpinTip: "Unpin",
     editTip: "Edit: point at a box and ask (E)",
@@ -63,6 +69,12 @@ const TEXT = {
     hint: "Click a node to light its flow · E to edit · drag to move · ⌘ scroll to zoom",
   },
   ko: {
+    newTip: "에이전트에게 새 다이어그램 요청",
+    newDiagram: "새 다이어그램",
+    newPlaceholder: "무엇을 그려 달라고 할까요? 예: DB 구조",
+    newHint: "새 파일로 그려서 탭으로 열려요",
+    drawingNew: "그리는 중…",
+    suggest: ["DB 구조", "API 요청 흐름", "프로젝트 전체 구조", "이 기능 자세히: "],
     pinTip: "고정: 7일이 지나도 보관",
     unpinTip: "고정 해제",
     editTip: "수정: 박스를 가리켜 요청 (E)",
@@ -106,6 +118,12 @@ const TEXT = {
     hint: "노드를 누르면 연결된 흐름만 강조돼요 · E 수정 · 드래그로 이동 · ⌘ 스크롤로 확대",
   },
   ja: {
+    newTip: "エージェントに新しい図を依頼",
+    newDiagram: "新しい図",
+    newPlaceholder: "何を描いてもらいますか？ 例: DBの構造",
+    newHint: "新しいファイルに描かれ、タブで開きます",
+    drawingNew: "作成中…",
+    suggest: ["DBの構造", "APIリクエストの流れ", "プロジェクト全体の構造", "この機能を詳しく: "],
     pinTip: "固定: 7日を過ぎても保存",
     unpinTip: "固定を解除",
     editTip: "編集: ボックスを指して依頼 (E)",
