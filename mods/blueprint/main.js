@@ -1,8 +1,10 @@
 // Blueprint: an agent's Mermaid flowchart drawn natively in a pane.
 //
 // Colour means status only (working = in progress, done = finished, the rest
-// neutral), from theme() tokens. What moves: a dot per line of work, running
-// from where the flow starts, node by node, to the node in progress.
+// neutral), from theme() tokens. Yellow is the work in progress: its nodes,
+// the edge that leads into it and the edges inside it. While this pane has
+// focus a dot runs through that part, one per line of work; otherwise nothing
+// moves (a running dot keeps the whole window repainting: ~11% -> ~28% CPU).
 // Click a node: its upstream and downstream
 // flow stays lit. Edit mode (e): click a node, say what should change, and it
 // goes to the agent in this tab as "In Blueprint I pointed at ...", the same
@@ -31,7 +33,7 @@ const ZMIN = 0.2, ZMAX = 3, ZFIT_MAX = 1.4;
 // dropped. So a flow gets a bounded number of spots, and spots that would sit
 // under a node box are not built at all (their ticks still pass).
 const FLOW_MS = 45; // per spot
-const FLOW_SPOTS = 22; // at most, per run
+const FLOW_SPOTS = 16; // at most, per run
 const FLOW_GAP = 6; // px between spots, at least
 const FLOW_REST = 360; // ms after each run
 const APPS = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", gemini: "Gemini", opencode: "OpenCode", grok: "Grok", amp: "Amp" };
@@ -105,7 +107,7 @@ export default class Blueprint extends View {
     this.views = []; // per tab: {z, x, y} once moved by hand; empty means fit
     this.dirs = []; // per tab: the direction last drawn
     this.measured = {}; // "n:<tab>:<id>" / "e:<tab>:<index>" -> {w, h} at 100%
-    this.ver = 0;
+    this.vers = this.graphs.map(() => 0); // per tab, bumped when its text is measured
     this.cache = new Map();
     this.size = null; // canvas, logical px
     this.width = 0; // whole view
@@ -158,7 +160,7 @@ export default class Blueprint extends View {
     if (this.healing) return;
     this.healing = true;
     const check = (cx, tries) => {
-      if (this.rendered >= this.wanted || tries > 8) {
+      if (this.rendered >= this.wanted || tries > 4) {
         this.healing = false;
         return;
       }
@@ -187,7 +189,7 @@ export default class Blueprint extends View {
   }
 
   layoutFor(i, dir) {
-    const key = `${i}:${dir}:${this.ver}`;
+    const key = `${i}:${dir}:${this.vers[i]}`;
     if (!this.cache.has(key)) {
       if (this.cache.size > 24) this.cache.clear();
       const g = this.graphs[i].g;
@@ -240,57 +242,41 @@ export default class Blueprint extends View {
     return { nodes, edges };
   }
 
-  // Where the dots run, grouped by connected part of the diagram. A run starts
-  // where the flow starts and follows the edges, through finished steps where
-  // there is a choice, to a node in progress. Each run is one dot: work on one
-  // line (a node passed on the way to a later one) is one run, work on two
-  // branches is two. Back edges are not followed.
-  routes(L) {
+  // The work in progress, as edges and runs. Yellow edges: inside the work
+  // (both ends in progress) and, for each place where work begins, one edge
+  // leading in, from a finished node when there is one. A run follows yellow
+  // edges from where work begins to where it ends; a fork makes a run per
+  // branch. Each run is one dot. Back edges are not followed.
+  scope(L) {
     const g = this.graph;
     const fwd = L.edges.filter((ed) => !ed.back);
-    const part = new Map();
-    let parts = 0;
-    for (const id of g.nodes.keys()) {
-      if (part.has(id)) continue;
-      const stack = [id];
-      part.set(id, parts);
-      while (stack.length) {
-        const v = stack.pop();
-        for (const e of g.edges) {
-          const w = e.from === v ? e.to : e.to === v ? e.from : null;
-          if (w != null && !part.has(w)) part.set(w, parts), stack.push(w);
-        }
-      }
-      parts++;
+    const busy = (id) => inProgress(g.nodes.get(id));
+    const inner = fwd.filter((ed) => busy(ed.e.from) && busy(ed.e.to));
+    const entries = [];
+    for (const n of g.nodes.values()) {
+      if (!inProgress(n) || inner.some((ed) => ed.e.to === n.id)) continue; // work begins here
+      const ins = fwd.filter((ed) => ed.e.to === n.id);
+      const lead = ins.find((ed) => g.nodes.get(ed.e.from)?.status === "done") ?? ins[0];
+      entries.push({ id: n.id, lead });
     }
-    const pathTo = (id) => {
-      const path = [], seen = new Set([id]);
-      for (let v = id; ; ) {
-        const ins = fwd.filter((ed) => ed.e.to === v && !seen.has(ed.e.from));
-        const ed = ins.find((ed) => g.nodes.get(ed.e.from)?.status === "done")
-          ?? ins.find((ed) => inProgress(g.nodes.get(ed.e.from))) ?? ins[0];
-        if (!ed) return path;
-        path.unshift(ed);
-        seen.add((v = ed.e.from));
-      }
+    const yellow = new Set([...inner, ...entries.map((x) => x.lead).filter(Boolean)].map((ed) => ed.e));
+    const runs = [];
+    const walk = (path, id, seen) => {
+      const next = inner.filter((ed) => ed.e.from === id && !seen.has(ed.e.to));
+      if (!next.length || runs.length >= 8) return path.length && runs.push(path);
+      for (const ed of next) walk([...path, ed], ed.e.to, new Set([...seen, ed.e.to]));
     };
-    const out = [];
-    for (let c = 0; c < parts; c++) {
-      let runs = [...g.nodes.values()].filter((n) => part.get(n.id) === c && inProgress(n))
-        .map((n) => ({ id: n.id, path: pathTo(n.id) })).filter((r) => r.path.length);
-      runs = runs.filter((r) => !runs.some((o) => o !== r && o.path.some((ed) => ed.e.from === r.id)));
-      if (runs.length) out.push(runs.map((r) => r.path));
-    }
-    return out;
+    for (const { id, lead } of entries) walk(lead ? [lead] : [], id, new Set([id]));
+    return { yellow, runs };
   }
 
   // Who a request goes to: agents in this pane's tab, the most recent first,
   // then terminals there running an agent program that reports no status.
-  targets() {
-    const me = panes().find((p) => p.mod === MOD);
+  targets(all = panes()) {
+    const me = all.find((p) => p.mod === MOD);
     const list = agents().filter((a) => !me || a.tab === me.tab).sort((a, b) => b.seq - a.seq)
       .map((a) => ({ address: a.address, name: APPS[a.app] ?? a.program?.name ?? a.app ?? a.address, status: a.status }));
-    for (const p of panes()) {
+    for (const p of all) {
       const agent = p.program && (p.program.agent || this.agentKeys.has(p.program.key));
       if (p.terminal && (!me || p.tab === me.tab) && agent && !list.some((x) => x.address === p.terminal)) {
         list.push({ address: p.terminal, name: p.program.name, status: p.status });
@@ -449,7 +435,9 @@ export default class Blueprint extends View {
     // app is busy): one of each per render.
     const t = theme(), pal = palette(t);
     this.mono = settings().font_family;
-    this.targetList = this.targets();
+    const all = panes();
+    this.paneFocused = !!all.find((p) => p.mod === MOD)?.focused;
+    this.targetList = this.targets(all);
     const G = this.graphs[this.tab];
     const narrow = this.width > 0 && this.width < 420;
     return v_flex()
@@ -486,7 +474,8 @@ export default class Blueprint extends View {
       .child(this.header(t, pal, G, narrow))
       .child(this.tabs(t))
       .child(this.canvas(t, pal, cx))
-      .child(this.footer(t, narrow));
+      .child(this.footer(t, narrow))
+      .children(this.measuring());
   }
 
   header(t, pal, G, narrow) {
@@ -652,10 +641,11 @@ export default class Blueprint extends View {
     };
     const head = Math.max(4, 7 * Math.sqrt(z));
     const tips = new Set();
-    const routes = this.exporting ? [] : this.routes(L).map((runs) => runs.filter((path) => !sel || path.every((ed) => sel.edges.has(ed.e))))
-      .filter((runs) => runs.length);
-    // The edge into each node in progress is drawn as work under way.
-    const into = new Set(routes.flat().map((path) => path[path.length - 1].e));
+    const work = this.scope(L);
+    const into = work.yellow;
+    // Dots only while this pane has focus: a running dot repaints the window
+    // on every tick, so the default is colour alone.
+    const runs = this.exporting || !this.paneFocused ? [] : work.runs.filter((path) => !sel || path.every((ed) => sel.edges.has(ed.e)));
     for (const ed of L.edges) {
       const lit = !sel || sel.edges.has(ed.e);
       const active = into.has(ed.e) && lit;
@@ -683,26 +673,25 @@ export default class Blueprint extends View {
     for (const gr of lines.values()) els.push(layer(gr.b.build(), gr.color));
     for (const gr of arrows.values()) els.push(layer(gr.b.build(), gr.color));
 
-    // A dot per run. Runs of one part leave together at the same pace, so where
-    // they share a start their dots overlap (built once) and part at the fork.
-    // Across a node a dot goes straight from where it came in to where it
-    // leaves, under the box.
-    for (const runs of routes) {
-      const lines = runs.map((path) => {
-        const pts = [];
-        path.forEach((ed, i) => {
-          const segs = ed.segs.map((sg) => sg.map((p) => ({ x: X(p.x), y: Y(p.y) })));
-          if (i > 0) pts.push({ ...segs[0][0], cross: true }); // under the node
-          for (const sg of segs) for (let k = i > 0 ? 1 : 0; k <= 16; k++) pts.push(at(sg, k / 16));
-        });
-        let len = 0;
-        return { pts: pts.map((p, k) => ({ ...p, d: k ? (len += Math.hypot(p.x - pts[k - 1].x, p.y - pts[k - 1].y)) : 0 })), len };
+    // A dot per run, all leaving together on one cycle, so runs that share a
+    // start overlap there (built once) and part at the fork. Across a node a
+    // dot goes straight from where it came in to where it leaves, under the box.
+    const tracks = runs.map((path) => {
+      const pts = [];
+      path.forEach((ed, i) => {
+        const segs = ed.segs.map((sg) => sg.map((p) => ({ x: X(p.x), y: Y(p.y) })));
+        if (i > 0) pts.push({ ...segs[0][0], cross: true }); // under the node
+        for (const sg of segs) for (let k = i > 0 ? 1 : 0; k <= 16; k++) pts.push(at(sg, k / 16));
       });
-      const longest = Math.max(...lines.map((l) => l.len));
+      let len = 0;
+      return { pts: pts.map((p, k) => ({ ...p, d: k ? (len += Math.hypot(p.x - pts[k - 1].x, p.y - pts[k - 1].y)) : 0 })), len };
+    });
+    if (tracks.length) {
+      const longest = Math.max(...tracks.map((l) => l.len));
       const step = Math.max(FLOW_GAP, longest / FLOW_SPOTS);
       const cycle = Math.ceil(longest / step) + Math.round(FLOW_REST / FLOW_MS);
       const built = new Set();
-      for (const l of lines) {
+      for (const l of tracks) {
         for (let d = step / 2, k = 0, tick = 0; d < l.len - head * 1.2; d += step, tick++) {
           while (k < l.pts.length - 1 && l.pts[k + 1].d < d) k++;
           const p = l.pts[k], key = `${Math.round(p.x)}:${Math.round(p.y)}:${tick}`;
@@ -727,30 +716,58 @@ export default class Blueprint extends View {
 
     for (const item of L.nodes) els.push(...this.node(item, t, pal, sel, X, Y, z));
 
-    // Text measured at 100%, invisible: node sizes follow the real text.
-    const mono = this.mono;
-    for (const n of this.graph.nodes.values()) {
-      const key = `n:${this.tab}:${n.id}`;
-      els.push(v_flex().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).items_center().gap(2)
-        .child(div().whitespace_nowrap().text_size(TITLE).font_semibold().child(n.title))
-        .when(!!n.sub, (el) => el.child(div().whitespace_nowrap().text_size(SUB).font_family(mono).child(n.sub)))
-        .on_size_change((s, cx) => this.measure(key, s, cx)));
+    return els;
+  }
+
+  // Text measured at 100%, invisible, so node sizes follow the real text: the
+  // shown tab first, then one other tab per render until all are done, so a
+  // switch finds its sizes ready without one heavy first render (a dropped
+  // render measures nothing, and retrying the same heavy one stalled the app).
+  measuring() {
+    const els = [], mono = this.mono;
+    if (this.measuredFont !== mono) {
+      // Another font: every size is stale.
+      this.measuredFont = mono;
+      this.measured = {};
+      this.vers = this.vers.map((v) => v + 1);
     }
-    this.graph.edges.forEach((e, k) => {
-      if (!e.label) return;
-      const key = `e:${this.tab}:${k}`;
-      els.push(div().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).px(5).py(1).whitespace_nowrap().text_size(LABEL)
-        .child(e.label).on_size_change((s, cx) => this.measure(key, s, cx)));
+    const missing = (i) => [...this.graphs[i].g.nodes.keys()].some((id) => !this.measured[`n:${i}:${id}`])
+      || this.graphs[i].g.edges.some((e, k) => e.label && !this.measured[`e:${i}:${k}`]);
+    const order = [this.tab, ...this.graphs.keys()].filter((i, k, a) => a.indexOf(i) === k);
+    const next = order.find(missing);
+    if (next === undefined) return els;
+    [next].forEach((i) => {
+      const { g } = this.graphs[i];
+      for (const n of g.nodes.values()) {
+        const key = `n:${i}:${n.id}`;
+        if (this.measured[key]) continue;
+        els.push(v_flex().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).items_center().gap(2)
+          .child(div().whitespace_nowrap().text_size(TITLE).font_semibold().child(n.title))
+          .when(!!n.sub, (el) => el.child(div().whitespace_nowrap().text_size(SUB).font_family(mono).child(n.sub)))
+          .on_size_change((s, cx) => this.measure(key, s, cx)));
+      }
+      g.edges.forEach((e, k) => {
+        const key = `e:${i}:${k}`;
+        if (!e.label || this.measured[key]) return;
+        els.push(div().id(`bp-m-${key}`).absolute().left(0).top(0).opacity(0).px(5).py(1).whitespace_nowrap().text_size(LABEL)
+          .child(e.label).on_size_change((s, cx) => this.measure(key, s, cx)));
+      });
     });
     return els;
   }
 
+  // Sizes arrive one callback per element in the same frame; draw once for all.
   measure(key, s, cx) {
     const old = this.measured[key];
     if (old && Math.abs(old.w - s.width) < 0.5 && Math.abs(old.h - s.height) < 0.5) return;
     this.measured[key] = { w: s.width, h: s.height };
-    this.ver++;
-    this.redraw(cx);
+    this.vers[Number(key.split(":")[1])]++;
+    if (this.measurePending) return;
+    this.measurePending = true;
+    cx.timer.after(16, (cx) => {
+      this.measurePending = false;
+      this.redraw(cx);
+    });
   }
 
   node(item, t, pal, sel, X, Y, z) {
