@@ -88,6 +88,20 @@ const minutesSince = (ts) => Math.floor((Date.now() - ts) / 60000);
 
 const inProgress = (n) => n?.status === "active" || n?.status === "current";
 
+// The widest a tab may be so that tabs of these natural widths (gaps
+// included) fit in `room`: the shortest ones whole, the rest sharing what is
+// left equally. Never under lo or over hi.
+export function tabCap(widths, room, lo, hi) {
+  const ws = [...widths].sort((a, b) => a - b);
+  let left = room;
+  for (let i = 0; i < ws.length; i++) {
+    const even = left / (ws.length - i);
+    if (ws[i] > even) return Math.max(lo, Math.min(hi, Math.floor(even)));
+    left -= ws[i];
+  }
+  return hi;
+}
+
 // An agent's status as the sidebar's Agents list marks it: working spins in the
 // working colour, done is a dot, idle a ring, needs-you a "!".
 function statusMark(t, status) {
@@ -138,7 +152,7 @@ const LANG_NAMES = { en: "English", ko: "Korean", ja: "Japanese" };
 // file of this project's folder, keep it current, mark the work in progress.
 // How a Blueprint diagram is written, for every request that asks for one.
 function diagramRules(lang) {
-  return `- Start the file with YAML frontmatter: \`title: ...\`. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class, route or columns).
+  return `- Start the file with YAML frontmatter: \`title: ...\`. The title is the diagram's tab in Blueprint: keep it short, 2 to 4 words (e.g. "Login flow", "DB tables"), no parentheses. Write the labels in ${LANG_NAMES[lang] ?? "English"}; a box can carry a second line with \`<br/>\` (e.g. the class, route or columns).
 - Blueprint draws Mermaid flowcharts only. For a database, draw one cylinder box per table (\`users[("users<br/>id · email")]\`) and label the edges with the relation (\`-->|1:N|\`).
 - Draw only what the code has. If the project has no such thing (say, no database), tell me so in your reply and draw what plays that part instead, titled for what it really is (e.g. "Data files"), with plain boxes: a cylinder means a real database table.
 - Every box is a piece of the code, not a step of your task. Tie each box to it: \`%% code: <node id> <path>:<line>\`.
@@ -1059,16 +1073,17 @@ export default class Blueprint extends View {
   tabs(t) {
     const p = this.project, G = this.graphs[this.tab];
     this.rowH = TABS_H;
-    // As in Chrome: every tab the same width, as wide as fits up to TAB_MAX,
-    // all narrowing together as tabs are added, down to TAB_MIN. A long title
-    // ends in "…" and shows whole in the tooltip.
+    // A tab is as wide as its title, up to TAB_MAX; a longer title ends in "…"
+    // and shows whole in the tooltip. When the tabs don't fit, the longest
+    // ones narrow together (short ones keep their size), down to TAB_MIN.
     const age = G ? this.T.ago(minutesSince(G.loaded)) : "";
     const room = this.width - 20 - (p ? 32 : 0) - (this.asking() ? 96 : 0) - (G ? estimate(age, 11.5) + 16 : 0);
-    const tabW = this.width > 0 ? Math.max(TAB_MIN, Math.min(TAB_MAX, Math.floor(room / Math.max(1, this.graphs.length)) - 4)) : TAB_MAX;
+    const natural = this.graphs.map((d) => estimate(d.tab, 12) + 22 + (d.pinned ? 16 : 0) + 4);
+    const tabMax = this.width > 0 ? tabCap(natural, room, TAB_MIN, TAB_MAX) : TAB_MAX;
     return h_flex().h(TABS_H).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border).overflow_hidden()
       .children(this.graphs.map((d, i) => {
         const on = i === this.tab;
-        return h_flex().id(`bp-tab-${i}`).flex_none().w(tabW).h(26).gap(5).px(10).items_center().rounded(6).text_size(12)
+        return h_flex().id(`bp-tab-${i}`).flex_none().max_w(tabMax).h(26).gap(5).px(10).items_center().rounded(6).text_size(12)
           .border_1().border_color(on ? t.input : t.border).tooltip(d.tab)
           .cursor_pointer().text_color(on ? t.foreground : t.muted)
           .when(on, (el) => el.bg(t.raised))
