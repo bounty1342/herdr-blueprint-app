@@ -38,7 +38,8 @@ import { text, pickLang, KEY_ALIASES, LANGS } from "./i18n.js";
 const MOD = "blueprint";
 const LANG_KEY = "blueprint.lang";
 const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
-const COMPOSE_H = 136; // the request box, as drawn 12px above the canvas bottom
+const COMPOSE_H = 136;
+const TAB_MIN = 72, TAB_MAX = 200; // diagram tabs, px // the request box, as drawn 12px above the canvas bottom
 const TITLE = 12.5, SUB = 10.5, LABEL = 11; // text px at 100%
 const ZMIN = 0.2, ZMAX = 3, ZFIT_MAX = 1.4;
 // The dot: built from still spots along its route, each showing "●" on its
@@ -1058,10 +1059,17 @@ export default class Blueprint extends View {
   tabs(t) {
     const p = this.project, G = this.graphs[this.tab];
     this.rowH = TABS_H;
-    return h_flex().h(TABS_H).flex_none().px(10).gap(2).items_center().border_b(1).border_color(t.border).overflow_hidden()
+    // As in Chrome: every tab the same width, as wide as fits up to TAB_MAX,
+    // all narrowing together as tabs are added, down to TAB_MIN. A long title
+    // ends in "…" and shows whole in the tooltip.
+    const age = G ? this.T.ago(minutesSince(G.loaded)) : "";
+    const room = this.width - 20 - (p ? 32 : 0) - (this.asking() ? 96 : 0) - (G ? estimate(age, 11.5) + 16 : 0);
+    const tabW = this.width > 0 ? Math.max(TAB_MIN, Math.min(TAB_MAX, Math.floor(room / Math.max(1, this.graphs.length)) - 4)) : TAB_MAX;
+    return h_flex().h(TABS_H).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border).overflow_hidden()
       .children(this.graphs.map((d, i) => {
         const on = i === this.tab;
-        return h_flex().id(`bp-tab-${i}`).flex_none().max_w(220).gap(5).px(10).py(4).items_center().rounded(6).text_size(12)
+        return h_flex().id(`bp-tab-${i}`).flex_none().w(tabW).h(26).gap(5).px(10).items_center().rounded(6).text_size(12)
+          .border_1().border_color(on ? t.input : t.border).tooltip(d.tab)
           .cursor_pointer().text_color(on ? t.foreground : t.muted)
           .when(on, (el) => el.bg(t.raised))
           .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
@@ -1083,7 +1091,7 @@ export default class Blueprint extends View {
         })
         .child(svg("mods/blueprint/plus.svg").size(14))))
       .child(div().flex_1())
-      .when(!!G, (el) => el.child(div().flex_none().pl(8).pr(4).text_size(11.5).text_color(t.dim).child(this.T.ago(minutesSince(G.loaded)))));
+      .when(!!G, (el) => el.child(div().flex_none().pl(8).pr(4).text_size(11.5).text_color(t.dim).child(age)));
   }
 
   canvas(t, pal, cx) {

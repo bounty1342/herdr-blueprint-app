@@ -136,20 +136,29 @@ export function layout(g, dir, size, labelSize) {
     });
     for (const id of layer) cross.set(id, cross.get(id) - x / 2);
   }
+  // Each layer in turn goes where its edges are shortest (the sum of squared
+  // offsets to its neighbours, long edges' pieces counting more so they stay
+  // straight) while keeping its order and spacing. Every step can only shorten
+  // the edges, so the drawing settles instead of drifting apart (pushing a
+  // layer one way and re-centring it did, when a long edge crossed a branch).
+  const weight = (a, b) => (dummy.has(a) && dummy.has(b) ? 4 : dummy.has(a) || dummy.has(b) ? 2 : 1);
   for (let it = 0; it < 24; it++) {
     const downward = it % 2 === 0;
     for (let k = 0; k < R; k++) {
       const layer = layers[downward ? k : R - 1 - k];
-      const want = layer.map((id) => {
-        const nb = [...up.get(id), ...down.get(id)];
-        return nb.length ? nb.reduce((s, n) => s + cross.get(n), 0) / nb.length : cross.get(id);
-      });
-      // In order, at least `apart` from the previous one, then shifted so the
-      // layer sits on what its nodes want, on average.
-      const x = [...want];
-      for (let i = 1; i < x.length; i++) x[i] = Math.max(x[i], x[i - 1] + apart(layer[i - 1], layer[i]));
-      const shift = x.reduce((s, v, i) => s + v - want[i], 0) / x.length;
-      layer.forEach((id, i) => cross.set(id, x[i] - shift));
+      const want = [], w = [];
+      for (const id of layer) {
+        let sum = 0, total = 0;
+        for (const n of [...up.get(id), ...down.get(id)]) {
+          const wt = weight(id, n);
+          sum += wt * cross.get(n);
+          total += wt;
+        }
+        want.push(total ? sum / total : cross.get(id));
+        w.push(total || 0.01);
+      }
+      const x = spaced(want, w, layer.map((id, i) => (i ? apart(layer[i - 1], id) : 0)));
+      layer.forEach((id, i) => cross.set(id, x[i]));
     }
   }
   // A one-to-one link (a's only successor is b, b's only predecessor is a)
@@ -234,6 +243,19 @@ export function layout(g, dir, size, labelSize) {
     out.push({ e, segs: [seg], label: e.label ? at(seg, 0.5) : null, tip: p3, dir: norm(sub(p3, seg[2])), back: true });
     grow(LR ? p0.x : side, LR ? side : p0.y, 4, 4);
   }
+  // A label goes where it covers no other label and no box: first the usual
+  // spot near the start, then further along its own path. Edges leaving one
+  // box side by side would otherwise put theirs on the same line.
+  const taken = ids.map((id) => ({ x: P.get(id).x, y: P.get(id).y, w: sz.get(id).w, h: sz.get(id).h }));
+  const clear = (c, l) => taken.every((b) => Math.abs(c.x - b.x) * 2 >= l.w + b.w + 4 || Math.abs(c.y - b.y) * 2 >= l.h + b.h + 4);
+  for (const ed of out) {
+    const l = ed.label && labels.get(ed.e);
+    if (!l) continue;
+    const spots = [ed.label];
+    for (const sg of ed.segs) for (const t of [0.45, 0.25, 0.65, 0.85]) spots.push(at(sg, t));
+    ed.label = spots.find((c) => clear(c, l)) ?? ed.label;
+    taken.push({ ...ed.label, w: l.w, h: l.h });
+  }
   for (const ed of out) {
     const l = ed.label && labels.get(ed.e);
     if (l) grow(ed.label.x, ed.label.y, l.w / 2, l.h / 2);
@@ -248,6 +270,25 @@ export function layout(g, dir, size, labelSize) {
 
 // Where an edge leaves `u` toward `next`, and its direction there. A diamond
 // branching up or down leaves from that corner (the "yes / no" look).
+// Positions closest to `want` (least squares, weighted by `w`) that keep the
+// order with at least gaps[i] between i-1 and i: subtract the running gap,
+// then pool neighbours that are out of order (isotonic regression).
+function spaced(want, w, gaps) {
+  const off = [];
+  gaps.forEach((g, i) => off.push((i ? off[i - 1] : 0) + g));
+  const blocks = [];
+  want.forEach((v, i) => {
+    blocks.push({ v: v - off[i], w: w[i], n: 1 });
+    while (blocks.length > 1 && blocks[blocks.length - 2].v > blocks[blocks.length - 1].v) {
+      const b2 = blocks.pop(), b1 = blocks.pop();
+      blocks.push({ v: (b1.v * b1.w + b2.v * b2.w) / (b1.w + b2.w), w: b1.w + b2.w, n: b1.n + b2.n });
+    }
+  });
+  const out = [];
+  for (const b of blocks) for (let k = 0; k < b.n; k++) out.push(b.v + off[out.length]);
+  return out;
+}
+
 function exitPort(u, next, LR) {
   if (LR) {
     if (u.shape === "diamond" && Math.abs(next.y - u.y) > u.h / 4) {
