@@ -35,6 +35,32 @@ import { checkoutOf, projectDir, hasDir, readMeta, updateMeta, isNews, load, pru
 import { addButton, removeButton } from "./setup.js";
 import { text, pickLang, KEY_ALIASES, LANGS } from "./i18n.js";
 
+// Herdr's zoom scales every px an element is given (w, left, text_size...), but
+// not path geometry, sizes from on_size_change, or pointer positions: those are
+// real px. The drawing works in layout px; appZoom() converts at those borders.
+const appZoom = () => Number(settings()?.zoom) || 1;
+
+// PathBuilder with every coordinate, stroke width and dash in layout px.
+function zoomed(b, k) {
+  const n = (v) => (typeof v === "number" ? v * k : v);
+  const w = (p) => ({
+    move_to: (x, y) => w(p.move_to(n(x), n(y))),
+    line_to: (x, y) => w(p.line_to(n(x), n(y))),
+    curve_to: (...a) => w(p.curve_to(...a.map(n))),
+    cubic_bezier_to: (...a) => w(p.cubic_bezier_to(...a.map(n))),
+    arc_to: (rx, ry, rot, large, sweep, x, y) => w(p.arc_to(n(rx), n(ry), rot, large, sweep, n(x), n(y))),
+    add_polygon: (pts, closed) => w(p.add_polygon(pts.map(([x, y]) => [n(x), n(y)]), closed)),
+    close: () => w(p.close()),
+    dash_array: (values) => w(p.dash_array(values.map((v) => v * k))),
+    build: () => p.build(),
+  });
+  return w(b);
+}
+const ZPath = {
+  fill: () => zoomed(PathBuilder.fill(), appZoom()),
+  stroke: (width) => zoomed(PathBuilder.stroke(width * appZoom()), appZoom()),
+};
+
 const MOD = "blueprint";
 const LANG_KEY = "blueprint.lang";
 const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
@@ -925,8 +951,10 @@ export default class Blueprint extends View {
         await shot(tmp);
         const pw = Number((await exec("sips", ["-g", "pixelWidth", tmp])).stdout.match(/pixelWidth:\s*(\d+)/)?.[1]);
         const s = pw / window.viewport_size().width;
-        const b = this.bounds, top = b.y + HEADER_H + (this.rowH ?? TABS_H);
-        const crop = [this.size.height, this.size.width, top, b.x].map((v) => String(Math.round(v * s)));
+        // Bounds and the canvas' raw size are real px; the header heights are layout px.
+        const Z = appZoom(), b = this.bounds, top = b.y + (HEADER_H + (this.rowH ?? TABS_H)) * Z;
+        const raw = this.rawSize ?? { width: this.size.width * Z, height: this.size.height * Z };
+        const crop = [raw.height, raw.width, top, b.x].map((v) => String(Math.round(v * s)));
         const r = await exec("sips", ["-c", crop[0], crop[1], "--cropOffset", crop[2], crop[3], tmp, "--out", out]);
         await exec("rm", ["-f", tmp]);
         if (r.code !== 0) throw new Error(r.stderr || r.stdout);
@@ -1110,20 +1138,29 @@ export default class Blueprint extends View {
   }
 
   canvas(t, pal, cx) {
+    // The canvas in layout px, also when the zoom changes without a resize.
+    if (this.rawSize) {
+      const Z = appZoom();
+      this.size = { width: this.rawSize.width / Z, height: this.rawSize.height / Z };
+    }
     const el = div().id("bp-canvas").flex_1().min_h(0).relative().overflow_hidden().bg(t.canvas)
       .when(!!this.drag?.moved, (el) => el.cursor_grabbing())
       .when(!this.drag?.moved, (el) => el.cursor_grab())
       .on_size_change((s, cx) => {
-        if (this.size && Math.abs(s.width - this.size.width) < 0.5 && Math.abs(s.height - this.size.height) < 0.5) return;
-        this.size = { width: s.width, height: s.height };
+        const r = this.rawSize;
+        if (r && Math.abs(s.width - r.width) < 0.5 && Math.abs(s.height - r.height) < 0.5) return;
+        this.rawSize = { width: s.width, height: s.height };
+        const Z = appZoom();
+        this.size = { width: s.width / Z, height: s.height / Z };
         this.redraw(cx);
       })
       .on_scroll_wheel((e, cx) => {
         if (!this.graphs.length) return;
-        const v = this.current().v;
-        const p = e.local_position ?? (e.bounds ? { x: e.position.x - e.bounds.x, y: e.position.y - e.bounds.y } : { x: this.size.width / 2, y: this.size.height / 2 });
+        const v = this.current().v, Z = appZoom();
+        const r = e.local_position ?? (e.bounds ? { x: e.position.x - e.bounds.x, y: e.position.y - e.bounds.y } : null);
+        const p = r ? { x: r.x / Z, y: r.y / Z } : { x: this.size.width / 2, y: this.size.height / 2 };
         if (e.modifiers.control || e.modifiers.platform) this.zoomAt(Math.exp(e.delta.y * 0.003), p.x, p.y);
-        else this.views[this.vkey] = { ...v, x: v.x + e.delta.x, y: v.y + e.delta.y };
+        else this.views[this.vkey] = { ...v, x: v.x + e.delta.x / Z, y: v.y + e.delta.y / Z };
         this.redraw(cx);
       })
       .on_mouse_down("left", (e) => {
@@ -1133,7 +1170,7 @@ export default class Blueprint extends View {
       .on_mouse_move((e, cx) => {
         const d = this.drag;
         if (!d) return;
-        const dx = e.position.x - d.x, dy = e.position.y - d.y;
+        const Z = appZoom(), dx = (e.position.x - d.x) / Z, dy = (e.position.y - d.y) / Z;
         if (!d.moved && Math.hypot(dx, dy) < 3) return;
         d.moved = true;
         this.views[this.vkey] = { ...d.v, x: d.v.x + dx, y: d.v.y + dy };
@@ -1265,7 +1302,7 @@ export default class Blueprint extends View {
     while (s < 12) s *= 2;
     while (s > 40) s /= 2;
     const dot = 1.6, ox = ((v.x % s) + s) % s, oy = ((v.y % s) + s) % s;
-    let grid = PathBuilder.stroke(dot).dash_array([dot, s - dot]);
+    let grid = ZPath.stroke(dot).dash_array([dot, s - dot]);
     for (let y = oy; y < H; y += s) grid = grid.move_to(ox - dot / 2, y).line_to(W + s, y);
     els.push(layer(grid.build(), alpha(t.foreground, 0.11)));
 
@@ -1273,14 +1310,14 @@ export default class Blueprint extends View {
     const lines = new Map(), arrows = new Map();
     const lineGroup = (key, color, width, dash) => {
       if (!lines.has(key)) {
-        let b = PathBuilder.stroke(width);
+        let b = ZPath.stroke(width);
         if (dash) b = b.dash_array(dash.map((d) => d * Math.max(0.6, z)));
         lines.set(key, { b, color });
       }
       return lines.get(key);
     };
     const arrowGroup = (color) => {
-      if (!arrows.has(color)) arrows.set(color, { b: PathBuilder.fill(), color });
+      if (!arrows.has(color)) arrows.set(color, { b: ZPath.fill(), color });
       return arrows.get(color);
     };
     const head = Math.max(4, 7 * Math.sqrt(z));
@@ -1451,14 +1488,14 @@ export default class Blueprint extends View {
     const i = bw / 2;
     if (n.shape === "diamond") {
       const poly = [[w / 2, i], [w - i, h / 2], [w / 2, h - i], [i, h / 2]];
-      box = box.child(full(PathBuilder.fill().add_polygon(poly, true).build(), bg))
-        .child(full(PathBuilder.stroke(bw).add_polygon(poly, true).build(), stroke));
+      box = box.child(full(ZPath.fill().add_polygon(poly, true).build(), bg))
+        .child(full(ZPath.stroke(bw).add_polygon(poly, true).build(), stroke));
     } else if (n.shape === "cylinder") {
       const rx = w / 2 - i, ry = 7 * z;
       const body = (b) => b.move_to(i, ry).arc_to(rx, ry - i, 0, false, true, w - i, ry).line_to(w - i, h - ry)
         .arc_to(rx, ry - i, 0, false, true, i, h - ry).close();
-      const outline = body(PathBuilder.stroke(bw)).move_to(i, ry).arc_to(rx, ry - i, 0, false, false, w - i, ry);
-      box = box.child(full(body(PathBuilder.fill()).build(), bg)).child(full(outline.build(), stroke)).pt(ry);
+      const outline = body(ZPath.stroke(bw)).move_to(i, ry).arc_to(rx, ry - i, 0, false, false, w - i, ry);
+      box = box.child(full(body(ZPath.fill()).build(), bg)).child(full(outline.build(), stroke)).pt(ry);
     } else {
       const r = n.shape === "stadium" ? h / 2 : n.shape === "circle" ? w / 2 : n.shape === "round" ? 14 * z : 8 * z;
       box = box.bg(bg).border(bw).border_color(stroke).rounded(r);
