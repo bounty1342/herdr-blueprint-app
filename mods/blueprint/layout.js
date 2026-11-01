@@ -42,12 +42,28 @@ export function layout(g, dir, size, labelSize) {
   for (let k = 0; k < ids.length; k++) {
     for (const [u, v] of ranked) if (rank.get(v) < rank.get(u) + 1) rank.set(v, rank.get(u) + 1);
   }
-  const target = new Set(ranked.map(([, v]) => v));
-  for (const id of ids) {
-    if (target.has(id)) continue;
-    const outs = ranked.filter(([u]) => u === id).map(([, v]) => rank.get(v));
-    if (outs.length) rank.set(id, Math.max(0, Math.min(...outs) - 1));
+  // Then every box with more edges out than in (a start, or a box that hands
+  // off to several) moves down to just above what it leads to: each step down
+  // shortens more edges than it lengthens. Bottom up, so a box sees where its
+  // children end up. Without it a start feeding the bottom of the drawing sat
+  // at the top, with long edges down one side and empty space around them.
+  const order = [...ids].sort((a, b) => rank.get(b) - rank.get(a));
+  for (let pass = 0; pass < 4; pass++) {
+    let moved = false;
+    for (const id of order) {
+      const outs = ranked.filter(([u]) => u === id).map(([, v]) => rank.get(v));
+      const ins = ranked.filter(([, v]) => v === id).length;
+      if (!outs.length || outs.length <= ins) continue;
+      const to = Math.min(...outs) - 1;
+      if (to > rank.get(id)) {
+        rank.set(id, to);
+        moved = true;
+      }
+    }
+    if (!moved) break;
   }
+  const top = Math.min(...rank.values());
+  for (const id of ids) rank.set(id, rank.get(id) - top);
   const R = Math.max(0, ...rank.values()) + 1;
 
   // 3. dummies (forward edges only; back edges go around the side)
