@@ -4,8 +4,13 @@
 # space. Claude Code runs without your user settings (no hooks, status line or
 # language from ~/.claude), in English, in auto mode, with edits allowed in
 # the project and in Blueprint's data folder.
+#
+#   scripts/demo/start.sh            Claude Code left, Blueprint right, 1280x800
+#   scripts/demo/start.sh --stack    Blueprint above Claude Code, 1280x1100
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
+stack=false; [ "${1:-}" = "--stack" ] && stack=true
+if $stack; then size="1280.0, 1100.0"; else size="1280.0, 800.0"; fi
 # Drop the outer agent session and Herdr, so nothing treats this as nested.
 for name in $(env | sed -n -E 's/^((HERDR_|CLAUDE|CODEX_|HC_)[A-Z_]*|AI_AGENT)=.*/\1/p'); do
   unset "$name"
@@ -20,7 +25,7 @@ printf 'export HOME="%s"\nPS1="%%1~ %%# "\nHISTFILE=%s/history\n' "$REAL_HOME" "
 rsync -a --exclude gpui-kit.d.ts --exclude jsconfig.json --exclude '.*' "$here/../../mods/blueprint/" "$HERDR_APP_HOME/mods/blueprint/"
 cp "$here/rose-pine.json" "$HERDR_APP_HOME/themes/"
 printf '{ "zoom": 1.0, "appearance": "dark", "sounds": { "enabled": false }, "core": "%s" }\n' "$(command -v herdr-core || echo "$REAL_HOME/.local/bin/herdr-core")" > "$HERDR_APP_HOME/settings.json"
-printf '{ "state": "windowed", "bounds": [60.0, 60.0, 1280.0, 800.0] }\n' > "$HERDR_APP_HOME/window.json"
+printf '{ "state": "windowed", "bounds": [60.0, 40.0, %s] }\n' "$size" > "$HERDR_APP_HOME/window.json"
 printf '{ "frame.welcomed": "skipped" }\n' > "$HERDR_APP_HOME/shared.json"
 # No "Updated to ..." toast: this home has seen this version.
 version=$(herdr-app --version | grep -o '[0-9][0-9.]*' | head -1)
@@ -43,5 +48,10 @@ hc keys t1 down enter >/dev/null 2>&1 || true
 # No sidebar: the agent and Blueprint get the whole width.
 herdr-app do layout.hide --id sidebar >/dev/null
 # Blueprint beside it (English: the window's home has no ~/.claude settings).
-herdr-app do pane.split --direction right --mod blueprint >/dev/null
+if $stack; then
+  herdr-app do pane.split --direction down --mod blueprint >/dev/null
+  herdr-app do pane.swap --direction up >/dev/null
+else
+  herdr-app do pane.split --direction right --mod blueprint >/dev/null
+fi
 echo "demo window up: $HERDR_APP_HOME"

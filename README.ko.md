@@ -2,10 +2,12 @@
 
 <p align="center"><b>코딩 에이전트가 만들고 있는 코드를 바로 옆에서 다이어그램으로 봅니다.</b></p>
 
+<p align="center">터미널에서 Herdr TUI를 쓰신다면 그쪽용 플러그인 <a href="https://github.com/chappse6/herdr-blueprint">herdr-blueprint</a>를 보세요.</p>
+
 <p align="center">
-  <img src="docs/media/point-and-ask.gif" alt="Claude Code가 그린 POST /token 흐름에서 rotate(refresh_token) 박스를 고르고 E로 요청 창을 열어 'reject refresh tokens issued to another client'를 보내면, Claude Code가 코드를 고치고 Blueprint에 'family.clientId == client_id?' 확인 단계가 새로 그려집니다.">
+  <img src="docs/media/point-and-ask.gif" alt="위에 Blueprint, 아래에 Claude Code. POST /login의 'argon2 verify' 박스를 고르고 E로 'lock the account for 15 minutes after 5 wrong passwords'를 보내면, 'locked?', '429 locked', 'Redis login_fail' 박스가 노란색으로 나타났다가 Claude Code가 다 만들면 체크로 바뀝니다.">
   <br>
-  <sub>박스를 가리켜 요청하면 Claude Code가 그 뒤의 코드를 고치고, Blueprint가 새 확인 단계를 그립니다. (<a href="docs/media/point-and-ask.mp4">MP4</a>)</sub>
+  <sub>박스를 고르고 E를 눌러 요청하면 Claude Code가 고칩니다. 만드는 동안 새 박스는 노란색, 끝나면 체크입니다. 실제 화면이고, 에이전트가 일한 1분 남짓을 2초로 줄였습니다. (<a href="docs/media/point-and-ask.mp4">MP4</a>)</sub>
 </p>
 
 Blueprint는 [Herdr](https://herdr.dev) 데스크톱 앱용 mod입니다. 에이전트가 지금 만드는 코드를 Mermaid flowchart로 그리면, Blueprint가 작업하는 동안 채팅 옆에 그 그림을 띄워 둡니다.
@@ -14,21 +16,26 @@ Blueprint는 [Herdr](https://herdr.dev) 데스크톱 앱용 mod입니다. 에이
 - **보고 있는 곳에 요청.** 박스를 고르고 `E`를 눌러 바꿀 내용을 쓰면, 에이전트는 그 박스와 코드 위치, 메모를 함께 받습니다.
 - **저장소 밖에 보관.** 다이어그램은 Herdr 앱 폴더에 프로젝트와 worktree별로 쌓이고, 7일 동안 아무도 보지 않으면 지워집니다. 남기고 싶은 건 고정하면 됩니다.
 
+**필요한 것: [Herdr 데스크톱 앱](https://herdr.dev) 0.1.10 이상 · macOS에서 확인함** (Windows, Linux용으로도 만들었지만 아직 돌려 보지 못했습니다.)
+
 ## 설치
 
 Herdr 안에서 에이전트를 띄우고 이렇게 부탁하세요.
 
 ```
-https://github.com/chappse6/herdr-blueprint-app 에 있는 Herdr mod를 추가해 줘
+https://github.com/chappse6/herdr-blueprint-app 에 있는 Herdr mod를 추가하고, 열어서 탭바 버튼까지 달아 줘
 ```
 
 에이전트는 Herdr의 `AGENTS.md`에 적힌 대로 `mods/blueprint`를 앱 폴더에 복사하고 확인합니다. 직접 하려면 `mods/blueprint`를 앱 폴더의 `mods` 아래(macOS는 `~/.config/herdr-app/mods/`)에 복사하고 `herdr-app check ~/.config/herdr-app/mods/blueprint`를 실행하세요.
 
-그다음 Herdr 안의 아무 터미널에서 에이전트 옆에 엽니다.
+그다음 Herdr 안의 아무 터미널에서 한 번 열고, Files와 Changes 옆에 Blueprint 버튼을 답니다(권장). 그 뒤로는 버튼으로 엽니다.
 
 ```
 herdr-app do pane.split --direction right --mod blueprint
+herdr-app do blueprint.add-button
 ```
+
+버튼을 없애려면 `herdr-app do blueprint.remove-button`을 실행합니다.
 
 ## 둘러보기
 
@@ -73,17 +80,38 @@ herdr-app do pane.split --direction right --mod blueprint
 
 ### 7. 탭바에서 열기
 
-Blueprint pane을 연 상태에서 `herdr-app do blueprint.add-button`을 한 번 실행하면 Files, Changes 옆에 Blueprint 버튼이 생깁니다. 지금 보고 있는 탭을 따라가는 사이드 패널로 열립니다. 다이어그램을 7일 넘게 두려면 고정하세요. `herdr-app do blueprint.remove-button`을 실행하면 버튼을 없애고 원래 쓰던 레이아웃으로 돌아갑니다.
+Blueprint 버튼(설치 참고)을 누르면 지금 보고 있는 탭을 따라가는 사이드 패널로 열리고, pane 아이콘을 누르면 그 탭 안의 pane으로 옮겨집니다. 다이어그램을 7일 넘게 두려면 고정하세요.
 
 <p align="center"><img src="docs/media/panel.png" width="720" alt="왼쪽에 Claude Code, 오른쪽에 Files, Changes 옆 Blueprint 버튼으로 연 사이드 패널. POST /logout 탭이 고정돼 있습니다."></p>
 
 ## 알아 둘 것
 
 - **에이전트.** Claude Code, Codex, Grok, Gemini, OpenCode 등 Herdr가 아는 에이전트. 요청은 `hc send`로 에이전트 터미널에 입력합니다.
-- **언어.** Claude Code의 `language` 설정을 따라 영어, 한국어, 일본어 중 하나로 표시합니다.
+- **언어.** 영어, 한국어, 일본어. Claude Code의 `language` 설정을 따르고, 없으면 영어입니다(Codex, Grok 등은 Blueprint가 읽는 언어 설정이 없습니다). `herdr-app do blueprint.lang-ko`(또는 `lang-en`, `lang-ja`)로 고정할 수 있고, `lang-auto`로 다시 Claude Code 설정을 따릅니다.
 - **저장 위치.** Herdr 앱 폴더의 `data/blueprint/projects/<이름>-<해시>/`. 다이어그램 하나가 `.mmd` 파일 하나이고, 고정과 연결한 에이전트는 `project.json`에 적힙니다. 프로젝트는 터미널 폴더의 git 최상위 폴더 기준이라 worktree마다 따로입니다.
 - **실행하는 것.** 프로젝트를 찾는 `git rev-parse`, 에이전트에게 입력하는 `hc send`, macOS에서 PNG를 만드는 `sips`와 `osascript`. 언어 설정 때문에 `~/.claude/settings.json`을 읽고, 네트워크는 쓰지 않습니다.
 - **지원 환경.** 셸, Python, Node 없이 macOS, Linux, Windows에서 돌도록 만들었습니다. 실제로 돌려 본 곳은 macOS(Herdr 0.1.10)뿐이고 Windows와 Linux는 아직 확인하지 못했습니다. PNG 내보내기는 macOS에서만 됩니다.
+
+## 자주 묻는 질문
+
+**토큰이 얼마나 더 드나요?** Blueprint 자체는 토큰을 쓰지 않고, 에이전트가 다이어그램을 쓸 때 씁니다. 230줄짜리 프로젝트에서 Claude Code(Opus 5.5) 한 세션으로 잰 값입니다.
+
+| 상황 | 출력 토큰 | 시간 |
+|---|---|---|
+| 연결 후 처음 그릴 때 | 약 3k | 30초 |
+| `+`로 새 다이어그램 | 약 2k | 20초 |
+| `E`로 수정 요청(코드, 테스트, 다이어그램 갱신 약 3번) | 그 차례 6.5k 중 2.4k | 89초 중 17초 |
+| 단계마다 `current`를 옮기라고 시킨 기능 구현 | 그 차례의 35~55% | 절반 정도 |
+
+갱신할 때마다 대화를 다시 읽는데, 프롬프트 캐시 덕분에 싸지만 사용량 한도에는 들어갑니다. 모델, 언어, 다이어그램 크기에 따라 달라집니다.
+
+**에이전트 작업이 느려지나요?** 조금 느려집니다. 다이어그램 갱신 한 번이 한 단계라서, 위 세션에서는 5~10초씩 걸렸습니다. 기본으로는 작업 단위가 끝나고 흐름이 바뀌었을 때만 갱신합니다. 단계마다 보여 달라고 하면 작업 시간이 두 배쯤 됩니다.
+
+**그냥 Mermaid로 그려 달라고 하면 되지 않나요?** 그러면 다 만든 뒤에 보는 지도가 생깁니다. Blueprint의 지도는 에이전트가 일하는 동안 살아 있어서 지금 어디를 만드는지 보여 주고, 박스를 가리켜 고치게 시킬 수 있습니다.
+
+## 기여
+
+이슈와 PR 환영합니다. Herdr 자체에 대한 이야기는 [Herdr Discord](https://discord.gg/PsgRfzmUDg)에서 할 수 있습니다.
 
 ## 개발
 

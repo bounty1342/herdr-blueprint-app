@@ -5,13 +5,15 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license">
   <img src="https://img.shields.io/badge/herdr-app%20mod-1f6feb" alt="Herdr app mod">
-  <img src="https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20Grok-6e40c9" alt="Claude Code, Codex, Grok">
+  <img src="https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20OpenCode-6e40c9" alt="Claude Code, Codex, Gemini, Grok, OpenCode">
 </p>
 
+<p align="center">Using the Herdr TUI in a terminal? You want <a href="https://github.com/chappse6/herdr-blueprint">herdr-blueprint</a>, the plugin for it.</p>
+
 <p align="center">
-  <img src="docs/media/point-and-ask.gif" alt="Blueprint shows Claude Code's flowchart of POST /token. The box rotate(refresh_token) is picked, E opens a request box, 'reject refresh tokens issued to another client' is sent, Claude Code changes the code, and Blueprint draws the new 'family.clientId == client_id?' check.">
+  <img src="docs/media/point-and-ask.gif" alt="Blueprint above Claude Code shows POST /login. The box 'argon2 verify' is picked, E opens a request box, 'lock the account for 15 minutes after 5 wrong passwords' is sent, the new boxes 'locked?', '429 locked' and 'Redis login_fail' appear in yellow while Claude Code builds them, then turn into checked boxes.">
   <br>
-  <sub>Point at a box and ask. Claude Code changed the code behind it, and Blueprint drew the new check. (<a href="docs/media/point-and-ask.mp4">MP4</a>)</sub>
+  <sub>Pick a box, press E, ask. Claude Code builds the change; the new boxes are yellow while it works and get a check when they do. Recorded live, the agent's minute squeezed into two seconds. (<a href="docs/media/point-and-ask.mp4">MP4</a>)</sub>
 </p>
 
 [한국어 README](README.ko.md)
@@ -22,21 +24,26 @@ Blueprint is a mod for the [Herdr](https://herdr.dev) desktop app. Your agent dr
 - **Ask where you look.** Pick a box, press `E` and write what should change. The agent gets the box, its place in the code and your note.
 - **Kept out of your repo.** Diagrams live in Herdr's app folder, one set per project and worktree, and the ones nobody looks at go away after 7 days unless you pin them.
 
+**Requires the [Herdr desktop app](https://herdr.dev) 0.1.10 or newer · tested on macOS** (written for Windows and Linux too, not tried there yet).
+
 ## Install
 
 Run an agent inside Herdr and ask it:
 
 ```
-Add the Herdr mod from https://github.com/chappse6/herdr-blueprint-app
+Add the Herdr mod from https://github.com/chappse6/herdr-blueprint-app, then open it and add its tab bar button
 ```
 
 Herdr's `AGENTS.md` tells the agent what to do: copy `mods/blueprint` into your Herdr app folder and check it. By hand, copy `mods/blueprint` into the `mods` folder there (`~/.config/herdr-app/mods/` on macOS) and run `herdr-app check ~/.config/herdr-app/mods/blueprint`.
 
-Then open it beside your agent, from any terminal in Herdr:
+Then, from any terminal in Herdr, open it once and add the Blueprint button next to Files and Changes (recommended; from then on the button opens it):
 
 ```
 herdr-app do pane.split --direction right --mod blueprint
+herdr-app do blueprint.add-button
 ```
+
+`herdr-app do blueprint.remove-button` takes the button away again.
 
 ## A tour
 
@@ -81,17 +88,38 @@ Agents are told to draw only what exists. Here Claude Code drew the two real Pos
 
 ### 7. In the tab bar
 
-`herdr-app do blueprint.add-button`, run once with a Blueprint pane open, puts a Blueprint button next to Files and Changes. It opens Blueprint as a side panel that follows the tab you are on. Pin a diagram to keep it past 7 days. `herdr-app do blueprint.remove-button` takes the button away and returns to the layout you had.
+The Blueprint button (see Install) opens Blueprint as a side panel that follows the tab you are on, and its pane icon moves it into the tab as a pane. Pin a diagram to keep it past 7 days.
 
 <p align="center"><img src="docs/media/panel.png" width="720" alt="Herdr with Claude Code on the left and Blueprint as a side panel on the right, opened from the Blueprint button next to Files and Changes; the POST /logout tab is pinned."></p>
 
 ## Good to know
 
 - **Agents.** Claude Code, Codex, Grok, Gemini, OpenCode and other agents Herdr knows. Requests are typed into their terminal with `hc send`.
-- **Language.** English, Korean or Japanese, following the `language` setting of Claude Code.
+- **Language.** English, Korean or Japanese. It follows Claude Code's `language` setting and is English otherwise (Codex, Grok and others have no such setting it reads). Pick one for good with `herdr-app do blueprint.lang-ko` (or `lang-en`, `lang-ja`; `lang-auto` to follow Claude Code again).
 - **Where diagrams live.** `data/blueprint/projects/<name>-<hash>/` in Herdr's app folder: one `.mmd` file per diagram and a `project.json` for pins and the connected agent. A project is the git top level of the terminal's folder, so every worktree is its own.
 - **What it runs.** `git rev-parse` to find the project, `hc send` to reach the agent, and `sips` and `osascript` for PNG export on macOS. It reads `~/.claude/settings.json` for the language. No network.
 - **Platforms.** Written for macOS, Linux and Windows with no shell, Python or Node. It has been run on macOS (Herdr 0.1.10); Windows and Linux are not tested yet. PNG export is macOS only.
+
+## FAQ
+
+**How many more tokens does it cost?** Blueprint itself uses none; the agent does when it writes a diagram. Measured in one Claude Code session (Opus 5.5) on a 230-line project:
+
+| What | Output tokens | Time |
+|---|---|---|
+| First drawing after connecting | about 3k | 30 s |
+| A new diagram with `+` | about 2k | 20 s |
+| A change asked with `E` (code, tests, and the diagram updated about 3 times) | 2.4k of the turn's 6.5k | 17 s of 89 s |
+| A feature where you ask it to move `current` at every step | 35 to 55% of the turn | about half of it |
+
+Updates reread the conversation, which prompt caching makes cheap but which still counts toward usage limits. Numbers change with the model, the language and the size of the diagram.
+
+**Does it slow the agent down?** A little: each diagram update is one more step, 5 to 10 seconds in the session above. By default the agent updates after each unit of work, and only when the flow changed. If you ask it to show every step, expect the work to take about twice as long.
+
+**Why not just ask the agent for a Mermaid diagram?** You can, and you get a map to read after the work is done. Blueprint keeps the map alive while the agent works, shows which part is being built, and lets you point at a box to have it changed.
+
+## Contributing
+
+Issues and pull requests are welcome. For Herdr itself, there is the [Herdr Discord](https://discord.gg/PsgRfzmUDg).
 
 ## Develop
 

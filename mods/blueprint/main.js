@@ -28,15 +28,17 @@
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand, window as host } from "herdr";
+import { theme, settings, agents, panes, spaces, focused, props as given, knownAgents, exec, hc, run, home, notify, readTextFile, watchFolder, nextCommand, shared, setShared, window as host } from "herdr";
 import { parseFlowchart } from "./mermaid.js";
 import { layout, at } from "./layout.js";
 import { checkoutOf, projectDir, hasDir, readMeta, updateMeta, isNews, load, pruneAll, KEEP_DAYS } from "./store.js";
 import { addButton, removeButton } from "./setup.js";
-import { text, pickLang, KEY_ALIASES } from "./i18n.js";
+import { text, pickLang, KEY_ALIASES, LANGS } from "./i18n.js";
 
 const MOD = "blueprint";
+const LANG_KEY = "blueprint.lang";
 const HEADER_H = 44, TABS_H = 38, FOOTER_H = 40;
+const COMPOSE_H = 136; // the request box, as drawn 12px above the canvas bottom
 const TITLE = 12.5, SUB = 10.5, LABEL = 11; // text px at 100%
 const ZMIN = 0.2, ZMAX = 3, ZFIT_MAX = 1.4;
 // The dot: built from still spots along its route, each showing "●" on its
@@ -122,7 +124,9 @@ function pointPrompt(G, n, note, path) {
   // Blueprint; here the diagram is the file.
   const save = `update the diagram in \`${path}\` (the Blueprint app shows that file; don't use herdr-blueprint send).`;
   const todo = n.ref ? `${work}${save}` : `Change it and anything it describes, then ${save}`;
-  const text = `In Blueprint I pointed at the box "${label}" in the diagram you sent ('${G.g.title ?? G.tab}')${where}.${stands}\n${note}\n${todo}\n${fenced(G.src, "mermaid")}\n`;
+  // So the person sees the change happen: yellow while it is built, then checked.
+  const live = "While you work, mark the boxes you are adding or changing `class <ids> active` (the one you are on `current`) in that file, and `done` once they work.";
+  const text = `In Blueprint I pointed at the box "${label}" in the diagram you sent ('${G.g.title ?? G.tab}')${where}.${stands}\n${note}\n${todo} ${live}\n${fenced(G.src, "mermaid")}\n`;
   return clean(text);
 }
 
@@ -183,18 +187,24 @@ export default class Blueprint extends View {
     this.cache = new Map();
     this.project = null; // { path, dir, meta, name }
     this.useLang("en");
-    // Follow Claude Code's language, and look again now and then.
+    // The language picked with blueprint.lang-<en|ko|ja> (kept in shared
+    // state, for every Blueprint and across restarts), else Claude Code's
+    // `language`, else English. Looked at again now and then.
     const follow = (cx) => cx.spawn(async (cx) => {
-      if (this.langForced) return;
       try {
-        const raw = await readTextFile(`${home()}/.claude/settings.json`);
-        const lang = pickLang(raw ? JSON.parse(raw).language : null);
+        const picked = shared(LANG_KEY);
+        let lang = LANGS.includes(picked) ? picked : null;
+        if (!lang) {
+          const raw = await readTextFile(`${home()}/.claude/settings.json`);
+          lang = pickLang(raw ? JSON.parse(raw).language : null);
+        }
         if (lang !== this.lang) {
           this.useLang(lang);
           this.redraw(cx);
         }
       } catch (_) {}
     });
+    this.followLang = follow;
     follow(cx);
     cx.timer.every(60000, (cx) => follow(cx));
     this.size = null; // canvas, logical px
@@ -724,9 +734,11 @@ export default class Blueprint extends View {
     else if (c === "new") this.openCreate();
     else if (c === "pane") this.openPane();
     else if (c === "reload") cx.spawn(async (cx) => this.reload(cx));
-    else if (c === "lang-auto") this.langForced = false;
-    else if (/^lang-(en|ko|ja)$/.test(c)) {
-      this.langForced = true;
+    else if (c === "lang-auto") {
+      setShared(LANG_KEY, null);
+      this.followLang?.(cx);
+    } else if (/^lang-(en|ko|ja)$/.test(c)) {
+      setShared(LANG_KEY, c.slice(5));
       this.useLang(c.slice(5));
     }
   }
@@ -766,6 +778,18 @@ export default class Blueprint extends View {
     }
     this.compose = { id };
     this.input.focus();
+    this.keepAbove(id);
+  }
+
+  // The request box covers the bottom of the canvas; in a low pane that can be
+  // the box it is about. Then the drawing moves up until the box shows above.
+  keepAbove(id) {
+    if (!this.size || !this.graphs.length) return;
+    const { L, v } = this.current();
+    const item = L.nodes.find((x) => x.node.id === id);
+    if (!item) return;
+    const bottom = (item.y + item.h / 2) * v.z + v.y, limit = this.size.height - COMPOSE_H - 16;
+    if (bottom > limit) this.views[this.vkey] = { ...v, y: v.y - (bottom - limit) };
   }
 
   // The + in the tab row: ask the agent for another diagram.
@@ -818,6 +842,9 @@ export default class Blueprint extends View {
         notify({ title: this.T.sent(target.name), body: fresh ? note : `${n.title}: ${note}`, level: "success", timeout: 4000 });
         // A new diagram: wait for a file that isn't there yet, then show it.
         if (fresh) this.expectNew = { dir: p.dir, known: new Set(this.graphs.map((d) => d.key)), since: Date.now(), label: note };
+        // Sent: watch the whole drawing change, not only the picked box's flow
+        // (boxes the agent adds would be dimmed).
+        this.selected = null;
         this.input.set_value("");
         this.noteEmpty = true;
         this.compose = null;

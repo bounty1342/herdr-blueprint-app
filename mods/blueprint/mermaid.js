@@ -31,6 +31,15 @@ const unquote = (s) => {
   return s.length > 1 && s.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : s;
 };
 
+// Characters written as entities, the HTML way (&lt; &#60;) or Mermaid's
+// (#lt; #60;): agents use both to keep < > " out of the syntax.
+const NAMED = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'", nbsp: " " };
+export function decode(s) {
+  if (!s || !/[&#]/.test(s)) return s;
+  return s.replace(/&#x([0-9a-f]+);|[&#]#?(\d+);|[&#](lt|gt|amp|quot|apos|nbsp);/gi, (all, hex, dec, name) =>
+    hex ? String.fromCodePoint(parseInt(hex, 16)) : dec ? String.fromCodePoint(Number(dec)) : NAMED[name.toLowerCase()] ?? all);
+}
+
 export function parseFlowchart(src) {
   const g = { title: null, dir: "LR", nodes: new Map(), edges: [], src };
   const raw = src.split("\n");
@@ -39,7 +48,7 @@ export function parseFlowchart(src) {
   if (lines[i] === "---") {
     for (i++; i < lines.length && lines[i] !== "---"; i++) {
       const m = lines[i].match(/^title:\s*(.+)$/);
-      if (m) g.title = unquote(m[1]);
+      if (m) g.title = decode(unquote(m[1]));
     }
     i++;
   }
@@ -94,7 +103,7 @@ function readNode(g, s, pos, at) {
     const end = s.indexOf(close, shut >= 0 ? shut + 1 : pos + open.length);
     if (end < 0) break;
     const [title, ...rest] = unquote(s.slice(pos + open.length, end)).split(/<br\s*\/?>/i);
-    Object.assign(n, { shape, title: title.trim(), sub: rest.join(" ").trim() || null });
+    Object.assign(n, { shape, title: decode(title.trim()), sub: decode(rest.join(" ").trim()) || null });
     if (!n.line) Object.assign(n, { line: at.line, lineText: at.text });
     return [id, end + close.length];
   }
@@ -110,7 +119,7 @@ function statement(g, s, at) {
     for (const [re, style, arrow] of EDGES) {
       const m = re.exec(s.slice(pos));
       if (m) {
-        hit = { len: m[0].length, label: m[1]?.trim() || null, style, arrow };
+        hit = { len: m[0].length, label: decode(unquote(m[1] ?? "")) || null, style, arrow };
         break;
       }
     }
