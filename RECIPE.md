@@ -60,11 +60,17 @@ With no diagram yet, a centred 440px card says "No diagram for this project yet"
 - Text sizes are measured with invisible elements (one tab per render) before layout; until then they are estimated (CJK characters count as wide).
 - `fs/promises` reads only inside the home folder (and writes only under the app folder): an app folder outside home (`HERDR_APP_HOME=/Users/Shared/...`) shows no diagrams. `readTextFile` reads anywhere.
 - A covered or locked window isn't redrawn, and `herdr-app shot` keeps returning its last frame: record demos with the window in front.
+- Herdr's `zoom` (settings.json, ⌘= / ⌘-) scales every px given to an element but not what crosses the other way: sizes from `on_size_change` (the canvas, the view's width, measured text), pointer positions and wheel deltas arrive in real px, and `paint_path` geometry is painted as real px. Keep everything in layout px: divide what comes in by the zoom, and multiply path coordinates, stroke widths and dashes by it. Read the zoom once per render (in `canvas()`), not per path.
 - Not tested on Windows or Linux yet. PNG export is macOS only.
+
+## Tests
+
+`node --import ./tests/stubs.mjs --test 'tests/*.test.mjs'` (Node 24 or newer) loads `main.js` against stubbed Herdr modules and checks, at zoom 1 and 1.2, that fit stays inside the canvas, edges meet their boxes, outlines fill them, the dot grid covers the canvas, measured text and pointer moves come out in layout px.
 
 ## Done when
 
-- `herdr-app check` passes for `mods/blueprint`.
+- `herdr-app check` passes for `mods/blueprint`, and the tests pass.
+- With `"zoom": 1.2` in settings.json, edges still meet their boxes and fit shows the whole drawing.
 - In a tab with Claude Code in a git repo, `herdr-app do pane.split --direction right --mod blueprint` opens Blueprint listing that agent; picking it types the draw request into its terminal, and a saved `.mmd` in the project folder shows up as a tab within a second or two.
 - A box marked `class x done` has a check; `class y active` has a yellow 2px stroke and the edge into it is dashed yellow; with the pane focused a dot runs along it, and without focus nothing moves.
 - Clicking a box dims everything outside its flow; `E` then opens the request box, and Enter types a prompt starting "In Blueprint I pointed at the box" into the agent.

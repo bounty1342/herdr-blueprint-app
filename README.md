@@ -123,6 +123,8 @@ Issues and pull requests are welcome. For Herdr itself, there is the [Herdr Disc
 
 ## Develop
 
+Tests run in Node 24 or newer, with Herdr's modules stubbed: `node --import ./tests/stubs.mjs --test 'tests/*.test.mjs'`. They also run on every pull request.
+
 `scripts/sync.sh` copies `mods/blueprint` into the Herdr app folder (Herdr doesn't reload a symlinked mod), and `--watch` copies on every change. `scripts/demo/` rebuilds the pictures on this page from a real session in a Herdr window of its own: `start.sh`, then `record.py` while you drive it, then `make.py clips.json`. `RECIPE.md` describes the mod for an agent that wants to build it from scratch.
 
 ## License

@@ -37,8 +37,10 @@ import { text, pickLang, KEY_ALIASES, LANGS } from "./i18n.js";
 
 // Herdr's zoom scales every px an element is given (w, left, text_size...), but
 // not path geometry, sizes from on_size_change, or pointer positions: those are
-// real px. The drawing works in layout px; appZoom() converts at those borders.
-const appZoom = () => Number(settings()?.zoom) || 1;
+// real px. The drawing works in layout px and converts at those borders with
+// this.zoom, read from settings() once per render, in canvas() (host calls are
+// the slow part of a render), and kept for the handlers in between.
+const zoomOf = (s) => (Number(s?.zoom) > 0 ? Number(s.zoom) : 1);
 
 // PathBuilder with every coordinate, stroke width and dash in layout px.
 function zoomed(b, k) {
@@ -56,10 +58,10 @@ function zoomed(b, k) {
   });
   return w(b);
 }
-const ZPath = {
-  fill: () => zoomed(PathBuilder.fill(), appZoom()),
-  stroke: (width) => zoomed(PathBuilder.stroke(width * appZoom()), appZoom()),
-};
+const zpaths = (k) => ({
+  fill: () => zoomed(PathBuilder.fill(), k),
+  stroke: (width) => zoomed(PathBuilder.stroke(width * k), k),
+});
 
 const MOD = "blueprint";
 const LANG_KEY = "blueprint.lang";
@@ -249,6 +251,7 @@ export default class Blueprint extends View {
     follow(cx);
     cx.timer.every(60000, (cx) => follow(cx));
     this.size = null; // canvas, logical px
+    this.zoom = 1; // Herdr's zoom, from the last render
     this.width = 0; // whole view
     this.selected = null;
     this.hovered = null;
@@ -952,7 +955,7 @@ export default class Blueprint extends View {
         const pw = Number((await exec("sips", ["-g", "pixelWidth", tmp])).stdout.match(/pixelWidth:\s*(\d+)/)?.[1]);
         const s = pw / window.viewport_size().width;
         // Bounds and the canvas' raw size are real px; the header heights are layout px.
-        const Z = appZoom(), b = this.bounds, top = b.y + (HEADER_H + (this.rowH ?? TABS_H)) * Z;
+        const Z = this.zoom, b = this.bounds, top = b.y + (HEADER_H + (this.rowH ?? TABS_H)) * Z;
         const raw = this.rawSize ?? { width: this.size.width * Z, height: this.size.height * Z };
         const crop = [raw.height, raw.width, top, b.x].map((v) => String(Math.round(v * s)));
         const r = await exec("sips", ["-c", crop[0], crop[1], "--cropOffset", crop[2], crop[3], tmp, "--out", out]);
@@ -1025,8 +1028,10 @@ export default class Blueprint extends View {
       .track_focus(this.focus)
       .on_size_change((s, cx) => {
         // Only on a real change: a notify here re-renders, which reports again.
-        if (Math.abs(s.width - this.width) < 0.5) return;
-        this.width = s.width;
+        // Real px in, layout px kept (tab widths and "narrow" are layout px).
+        const width = s.width / this.zoom;
+        if (Math.abs(width - this.width) < 0.5) return;
+        this.width = width;
         this.laidOut();
         this.redraw(cx);
       })
@@ -1138,9 +1143,10 @@ export default class Blueprint extends View {
   }
 
   canvas(t, pal, cx) {
+    this.zoom = zoomOf(settings());
     // The canvas in layout px, also when the zoom changes without a resize.
     if (this.rawSize) {
-      const Z = appZoom();
+      const Z = this.zoom;
       this.size = { width: this.rawSize.width / Z, height: this.rawSize.height / Z };
     }
     const el = div().id("bp-canvas").flex_1().min_h(0).relative().overflow_hidden().bg(t.canvas)
@@ -1150,13 +1156,13 @@ export default class Blueprint extends View {
         const r = this.rawSize;
         if (r && Math.abs(s.width - r.width) < 0.5 && Math.abs(s.height - r.height) < 0.5) return;
         this.rawSize = { width: s.width, height: s.height };
-        const Z = appZoom();
+        const Z = this.zoom;
         this.size = { width: s.width / Z, height: s.height / Z };
         this.redraw(cx);
       })
       .on_scroll_wheel((e, cx) => {
         if (!this.graphs.length) return;
-        const v = this.current().v, Z = appZoom();
+        const v = this.current().v, Z = this.zoom;
         const r = e.local_position ?? (e.bounds ? { x: e.position.x - e.bounds.x, y: e.position.y - e.bounds.y } : null);
         const p = r ? { x: r.x / Z, y: r.y / Z } : { x: this.size.width / 2, y: this.size.height / 2 };
         if (e.modifiers.control || e.modifiers.platform) this.zoomAt(Math.exp(e.delta.y * 0.003), p.x, p.y);
@@ -1170,7 +1176,7 @@ export default class Blueprint extends View {
       .on_mouse_move((e, cx) => {
         const d = this.drag;
         if (!d) return;
-        const Z = appZoom(), dx = (e.position.x - d.x) / Z, dy = (e.position.y - d.y) / Z;
+        const Z = this.zoom, dx = (e.position.x - d.x) / Z, dy = (e.position.y - d.y) / Z;
         if (!d.moved && Math.hypot(dx, dy) < 3) return;
         d.moved = true;
         this.views[this.vkey] = { ...d.v, x: d.v.x + dx, y: d.v.y + dy };
@@ -1302,6 +1308,7 @@ export default class Blueprint extends View {
     while (s < 12) s *= 2;
     while (s > 40) s /= 2;
     const dot = 1.6, ox = ((v.x % s) + s) % s, oy = ((v.y % s) + s) % s;
+    const ZPath = zpaths(this.zoom);
     let grid = ZPath.stroke(dot).dash_array([dot, s - dot]);
     for (let y = oy; y < H; y += s) grid = grid.move_to(ox - dot / 2, y).line_to(W + s, y);
     els.push(layer(grid.build(), alpha(t.foreground, 0.11)));
@@ -1443,7 +1450,9 @@ export default class Blueprint extends View {
   }
 
   // Sizes arrive one callback per element in the same frame; draw once for all.
-  measure(key, mk, s, cx) {
+  measure(key, mk, real, cx) {
+    // Text is measured on screen, in real px; sizes are kept in layout px.
+    const s = { width: real.width / this.zoom, height: real.height / this.zoom };
     const old = this.measured[key];
     if (old && Math.abs(old.w - s.width) < 0.5 && Math.abs(old.h - s.height) < 0.5) return;
     this.measured[key] = { w: s.width, h: s.height };
@@ -1457,6 +1466,7 @@ export default class Blueprint extends View {
   }
 
   node(item, t, pal, sel, X, Y, z) {
+    const ZPath = zpaths(this.zoom);
     const n = item.node, w = item.w * z, h = item.h * z;
     const left = X(item.x) - w / 2, top = Y(item.y) - h / 2;
     const lit = !sel || sel.nodes.has(n.id);
